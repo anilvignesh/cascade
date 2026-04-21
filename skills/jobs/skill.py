@@ -1,5 +1,5 @@
 """
-/jobs — fetch latest Dubai PM job listings via the Jarvis job hunter agent.
+/jobs — fetch latest job listings from the local job hunter agent cache.
 """
 
 import sys
@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path.home() / ".jarvis"))
 
-DESCRIPTION = "Fetch latest Dubai PM job listings"
+DESCRIPTION = "Fetch latest job listings from local cache"
 
 
 def run(query: str = "", context: str = "") -> str:
