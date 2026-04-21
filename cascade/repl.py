@@ -1,6 +1,6 @@
 """
 Cascade interactive REPL.
-Type queries → Qwen3 or Claude responds.
+Type queries → Qwen3 (streaming) or Claude responds.
 Session conversation kept in memory. All exchanges saved to MemPalace.
 """
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / ".jarvis"))
 
-from .llm     import call_local, call_claude
+from .llm     import call_local, call_local_stream, call_claude, call_gemini, route_query
 from .profile import load as load_profile
 
 C_GREEN  = "\033[92m"
@@ -42,8 +42,8 @@ def mem_search(query: str) -> str:
 def mem_save(query: str, response: str, backend: str):
     entry = (
         f"[cascade/{backend}] {datetime.now():%Y-%m-%d %H:%M}\n"
-        f"Q: {query[:200]}\n"
-        f"A: {response[:600]}"
+        f"Q: {query[:500]}\n"
+        f"A: {response[:2000]}"
     )
     try:
         subprocess.run(
@@ -55,24 +55,8 @@ def mem_save(query: str, response: str, backend: str):
         pass
 
 
-def route(query: str) -> str:
-    try:
-        from agents.router import route as _route
-        return _route(query)
-    except Exception:
-        pass
-    claude_kw = ["draft", "write", "build", "create", "code", "script",
-                 "refactor", "fix", "implement", "email", "execute"]
-    if any(k in query.lower() for k in claude_kw):
-        return "claude"
-    return "local"
-
-
-def ask_local(query: str, session_msgs: list[dict]) -> str:
-    """Call Qwen3 with user profile + session history + relevant memory."""
+def _build_local_messages(query: str, session_msgs: list[dict], mem: str) -> list[dict]:
     profile = load_profile()
-    mem     = mem_search(query)
-
     messages = [{"role": "system", "content": SYSTEM}]
     if profile:
         messages.append({"role": "user",      "content": f"User profile:\n{profile}"})
@@ -80,18 +64,28 @@ def ask_local(query: str, session_msgs: list[dict]) -> str:
     if mem:
         messages.append({"role": "user",      "content": f"Relevant memory:\n{mem}"})
         messages.append({"role": "assistant",  "content": "Noted."})
-    messages.extend(session_msgs[-6:])
+    messages.extend(session_msgs[-8:])
     messages.append({"role": "user", "content": query})
+    return messages
+
+
+def ask_local(query: str, session_msgs: list[dict], mem: str = "") -> str:
+    """Non-streaming Qwen3 — used by Telegram bot and other callers."""
+    messages = _build_local_messages(query, session_msgs, mem)
     return call_local(messages, max_tokens=1024)
 
 
-def ask_claude(query: str, session_msgs: list[dict]) -> str:
-    """Call Claude with user profile + session history + relevant memory."""
-    profile = load_profile()
-    mem     = mem_search(query)
+def ask_local_stream(query: str, session_msgs: list[dict], mem: str):
+    """Streaming Qwen3 — yields chunks for real-time output in REPL."""
+    messages = _build_local_messages(query, session_msgs, mem)
+    return call_local_stream(messages, max_tokens=1024)
 
+
+def _build_cloud_context(session_msgs: list[dict], mem: str,
+                          persona: str = "Cascade, a local-first AI assistant") -> str:
+    profile = load_profile()
     ctx_parts = [
-        f"You are Cascade, a local-first AI assistant.\n"
+        f"You are {persona}.\n"
         f"Be direct and concise. Today: {datetime.today():%A %d %B %Y}."
     ]
     if profile:
@@ -101,15 +95,38 @@ def ask_claude(query: str, session_msgs: list[dict]) -> str:
     if session_msgs:
         turns = "\n".join(
             f"{'User' if m['role']=='user' else 'Cascade'}: {m['content'][:300]}"
-            for m in session_msgs[-6:]
+            for m in session_msgs[-8:]
         )
         ctx_parts.append(f"Recent conversation:\n{turns}")
-    return call_claude(query, context="\n\n".join(ctx_parts))
+    return "\n\n".join(ctx_parts)
+
+
+def ask_gemini(query: str, session_msgs: list[dict], mem: str) -> str:
+    context = _build_cloud_context(session_msgs, mem)
+    return call_gemini(query, context=context)
+
+
+def ask_claude(query: str, session_msgs: list[dict], mem: str) -> str:
+    context = _build_cloud_context(session_msgs, mem)
+    return call_claude(query, context=context)
+
+
+def _build_skill_context(query: str, session_msgs: list[dict], mem: str) -> str:
+    parts = []
+    if mem:
+        parts.append(f"Relevant memory:\n{mem}")
+    if session_msgs:
+        turns = "\n".join(
+            f"{'User' if m['role']=='user' else 'Cascade'}: {m['content'][:200]}"
+            for m in session_msgs[-4:]
+        )
+        parts.append(f"Recent conversation:\n{turns}")
+    return "\n\n".join(parts)
 
 
 def run():
     print(f"\n{C_BOLD}{C_GREEN}◆ CASCADE{C_RESET}  "
-          f"{C_DIM}local-first AI · !! for Claude · /skill · exit{C_RESET}\n")
+          f"{C_DIM}Qwen3 · Gemini · Claude  ·  !! claude  ·  !g gemini  ·  /skill  ·  exit{C_RESET}\n")
 
     history      = []   # (query, response, backend)
     session_msgs = []   # running conversation for multi-turn context
@@ -139,35 +156,57 @@ def run():
             print(f"{C_DIM}cleared{C_RESET}\n")
             continue
 
-        force_claude = raw.startswith("!!")
-        query = raw[2:].strip() if force_claude else raw
-
         try:
-            # Skill invocation
-            from .skills import detect_skill, run_skill
-            skill_name = detect_skill(query)
-            if skill_name:
-                skill_query = " ".join(query.split()[1:])
-                print(f"  {C_DIM}[/{skill_name}]{C_RESET}\n", flush=True)
-                response = run_skill(skill_name, skill_query)
+            from .skills import run_skill, skill_exists
+
+            # Single routing call — handles /skill, !!, !g, and natural language
+            route_type, route_value, clean_query = route_query(raw)
+
+            # Validate skill exists; fall back to model if not
+            if route_type == "skill" and not skill_exists(route_value):
+                route_type, route_value, clean_query = "model", "gemini", raw
+
+            if route_type == "skill":
+                mem     = mem_search(clean_query or raw)
+                context = _build_skill_context(raw, session_msgs, mem)
+                print(f"  {C_DIM}[/{route_value}]{C_RESET}\n", flush=True)
+                response = run_skill(route_value, clean_query, context)
                 print(response, "\n")
-                mem_save(query, response, f"skill:{skill_name}")
-                history.append((query, response, f"skill:{skill_name}"))
+                mem_save(raw, response, f"skill:{route_value}")
+                history.append((raw, response, f"skill:{route_value}"))
                 continue
 
-            # Route
-            mode = "claude" if force_claude else route(query)
-            label = f"{C_BLUE}Claude{C_RESET}" if mode == "claude" else f"{C_GOLD}Qwen3{C_RESET}"
+            # Model routing
+            query = clean_query
+            mem   = mem_search(query)
+
+            C_PURPLE = "\033[95m"
+            mode = route_value
+            if mode == "claude":
+                label = f"{C_BLUE}Claude{C_RESET}"
+            elif mode == "gemini":
+                label = f"{C_PURPLE}Gemini{C_RESET}"
+            else:
+                label = f"{C_GOLD}Qwen3{C_RESET}"
             print(f"  {C_DIM}[{label}{C_DIM}]{C_RESET}\n", flush=True)
 
             if mode == "claude":
-                response = ask_claude(query, session_msgs)
-                backend  = "claude"
+                response = ask_claude(query, session_msgs, mem)
+                print(response, "\n")
+                backend = "claude"
+            elif mode == "gemini":
+                response = ask_gemini(query, session_msgs, mem)
+                print(response, "\n")
+                backend = "gemini"
             else:
-                response = ask_local(query, session_msgs)
-                backend  = "local"
-
-            print(response, "\n")
+                # Streaming — print chunks as they arrive
+                chunks = []
+                for chunk in ask_local_stream(query, session_msgs, mem):
+                    print(chunk, end="", flush=True)
+                    chunks.append(chunk)
+                print("\n")
+                response = "".join(chunks)
+                backend = "local"
 
             # Update session conversation (multi-turn)
             session_msgs.append({"role": "user",      "content": query})

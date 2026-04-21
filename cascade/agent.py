@@ -7,25 +7,46 @@ Each role runs locally (Qwen3). Escalates to Claude on uncertainty or failure.
 import json, re
 from .state  import WorkerState, Status
 from .roles  import PROGRAMMER, REVIEWER, TESTER, Role
-from .tools  import execute
+from .tools  import execute, REGISTRY
 from .llm    import call_local, call_claude, should_escalate  # noqa: F401
 
 
-TOOL_PATTERN = re.compile(
-    r'<tool>\s*(\w+)\s*</tool>\s*<args>(.*?)</args>',
-    re.DOTALL
-)
+# Multiple patterns in priority order — Qwen3 is inconsistent with format
+_PATTERNS = [
+    # Primary: <tool>name</tool><args>{...}</args>
+    re.compile(r'<tool>\s*(\w+)\s*</tool>\s*<args>(.*?)</args>', re.DOTALL),
+    # Alternate XML: <function name="tool">...</function>
+    re.compile(r'<function\s+name=["\'](\w+)["\'][^>]*>(.*?)</function>', re.DOTALL),
+    # JSON object: {"tool": "name", "args": {...}}
+    re.compile(r'\{\s*"tool"\s*:\s*"(\w+)"\s*,\s*"args"\s*:\s*(\{.*?\})\s*\}', re.DOTALL),
+]
+
+# Markdown code block → bash tool fallback
+_BASH_BLOCK = re.compile(r'```(?:bash|sh|shell)\n(.*?)```', re.DOTALL)
 
 
 def parse_tool_calls(text: str) -> list[tuple[str, dict]]:
     calls = []
-    for m in TOOL_PATTERN.finditer(text):
-        name = m.group(1).strip()
-        try:
-            args = json.loads(m.group(2).strip())
-        except json.JSONDecodeError:
-            args = {"command": m.group(2).strip()}
-        calls.append((name, args))
+
+    for pattern in _PATTERNS:
+        for m in pattern.finditer(text):
+            name = m.group(1).strip()
+            if name not in REGISTRY:
+                continue
+            try:
+                args = json.loads(m.group(2).strip())
+            except json.JSONDecodeError:
+                args = {"command": m.group(2).strip()}
+            calls.append((name, args))
+        if calls:
+            return calls
+
+    # Fallback: markdown bash blocks → bash tool
+    for m in _BASH_BLOCK.finditer(text):
+        command = m.group(1).strip()
+        if command:
+            calls.append(("bash", {"command": command}))
+
     return calls
 
 

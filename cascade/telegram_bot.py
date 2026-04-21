@@ -30,9 +30,9 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-from .repl    import ask_local, ask_claude, mem_save, route
+from .repl    import ask_local, ask_claude, ask_gemini, mem_save, mem_search
 from .profile import load as load_profile
-from .llm     import call_claude
+from .llm     import call_claude, call_gemini, route_query
 from .parsers import extract
 
 TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "")
@@ -59,9 +59,14 @@ async def _typing(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def _reply(update: Update, text: str, backend: str = ""):
-    label = {"claude": "_via Claude_", "local": "_via Qwen3_"}.get(backend, "")
-    for i, chunk in enumerate(_chunks(text)):
-        suffix = f"\n\n{label}" if label and i == len(_chunks(text)) - 1 else ""
+    label = {
+        "claude": "🔵 _Claude_",
+        "gemini": "🟣 _Gemini_",
+        "local":  "🟡 _Qwen3_",
+    }.get(backend, "")
+    chunks = _chunks(text)
+    for i, chunk in enumerate(chunks):
+        suffix = f"\n\n{label}" if label and i == len(chunks) - 1 else ""
         try:
             await update.message.reply_text(
                 chunk + suffix, parse_mode=ParseMode.MARKDOWN
@@ -71,23 +76,42 @@ async def _reply(update: Update, text: str, backend: str = ""):
 
 
 async def _respond(update: Update, ctx: ContextTypes.DEFAULT_TYPE,
-                   query: str, force_claude: bool = False, file_context: str = ""):
-    session = ctx.chat_data.get("session", [])
+                   query: str, force_backend: str = "", file_context: str = ""):
+    from .skills import run_skill, skill_exists
+
+    session    = ctx.chat_data.get("session", [])
     full_query = f"{file_context}\n\n{query}".strip() if file_context else query
 
-    mode = "claude" if force_claude else route(full_query)
-
     await _typing(update, ctx)
+    await update.message.reply_text("…")
     try:
-        if mode == "claude":
-            response = ask_claude(full_query, session)
-            backend  = "claude"
+        if force_backend:
+            route_type, route_value, clean_query = "model", force_backend, full_query
         else:
-            response = ask_local(full_query, session)
+            route_type, route_value, clean_query = route_query(full_query)
+            if route_type == "skill" and not skill_exists(route_value):
+                route_type, route_value, clean_query = "model", "gemini", full_query
+
+        if route_type == "skill":
+            mem      = mem_search(clean_query or full_query)
+            response = run_skill(route_value, clean_query)
+            await _reply(update, response, f"skill:{route_value}")
+            mem_save(query, response, f"skill:{route_value}")
+            return
+
+        mem = mem_search(clean_query)
+        if route_value == "claude":
+            response = ask_claude(clean_query, session, mem)
+            backend  = "claude"
+        elif route_value == "gemini":
+            response = ask_gemini(clean_query, session, mem)
+            backend  = "gemini"
+        else:
+            response = ask_local(clean_query, session, mem)
             backend  = "local"
 
         session.extend([
-            {"role": "user",      "content": full_query[:500]},
+            {"role": "user",      "content": clean_query[:500]},
             {"role": "assistant", "content": response[:500]},
         ])
         ctx.chat_data["session"] = session[-12:]
@@ -105,13 +129,14 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _auth(update):
         return
     await update.message.reply_text(
-        "◆ *Cascade* — local-first AI\n\n"
+        "◆ *Cascade* — Qwen3 · Gemini · Claude\n\n"
         "Send me anything:\n"
-        "• A question or task\n"
+        "• A question or task — auto-routed to the right model\n"
         "• A document (PDF, DOCX) — I'll read it\n"
         "• A voice message — I'll transcribe and answer\n"
         "• A resume + 'find matching jobs'\n\n"
-        "Prefix with `!!` to force Claude for hard tasks.\n\n"
+        "`!!` force Claude · `!g` force Gemini\n"
+        "System tasks need *jarvis do it* to confirm.\n\n"
         "/status · /history · /clear · /skills",
         parse_mode=ParseMode.MARKDOWN
     )
@@ -169,6 +194,19 @@ async def skills_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     for name, desc in skills.items():
         lines.append(f"`/{name}` — {desc}")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+async def brief_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _auth(update):
+        return
+    await _typing(update, ctx)
+    await update.message.reply_text("_Generating brief…_", parse_mode=ParseMode.MARKDOWN)
+    try:
+        from .brief import run as brief_run
+        brief_run()
+        await update.message.reply_text("Brief sent to Telegram.")
+    except Exception as e:
+        await update.message.reply_text(f"Brief error: {e}")
 
 
 CONFIRM_PHRASE = "jarvis do it"
@@ -245,19 +283,16 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("_Cancelled._", parse_mode=ParseMode.MARKDOWN)
         return
 
-    # ── Skill invocation ──
-    from .skills import detect_skill, run_skill
-    skill_name = detect_skill(query)
-    if skill_name:
-        skill_query = " ".join(query.split()[1:])
-        await _typing(update, ctx)
-        response = run_skill(skill_name, skill_query)
-        await _reply(update, response)
-        return
-
-    # ── System task detection ──
-    force_claude = query.startswith("!!")
-    clean_query  = query[2:].strip() if force_claude else query
+    # Resolve force-backend prefixes so _is_system_task sees the real query
+    if query.startswith("!!"):
+        force_backend = "claude"
+        clean_query   = query[2:].strip()
+    elif query.startswith("!g"):
+        force_backend = "gemini"
+        clean_query   = query[2:].strip()
+    else:
+        force_backend = ""
+        clean_query   = query
 
     if _is_system_task(clean_query):
         await _typing(update, ctx)
@@ -269,7 +304,8 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await _respond(update, ctx, clean_query, force_claude=force_claude)
+    # _respond handles skill detection + model routing via route_query
+    await _respond(update, ctx, clean_query, force_backend=force_backend)
 
 
 async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -305,7 +341,7 @@ async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             query = f"I've uploaded a file called '{doc.file_name}'. Summarise the key points and tell me what's most important."
 
         file_context = f"[File: {doc.file_name}]\n{content[:4000]}"
-        await _respond(update, ctx, query, force_claude=True, file_context=file_context)
+        await _respond(update, ctx, query, force_backend="claude", file_context=file_context)
 
     except Exception as e:
         await update.message.reply_text(f"File handling error: {e}")
@@ -388,6 +424,7 @@ def run():
     app.add_handler(CommandHandler("history", history_cmd))
     app.add_handler(CommandHandler("clear",   clear_cmd))
     app.add_handler(CommandHandler("skills",  skills_cmd))
+    app.add_handler(CommandHandler("brief",   brief_cmd))
 
     app.add_handler(MessageHandler(filters.TEXT    & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.Document.ALL,               handle_document))

@@ -6,6 +6,10 @@ Cascade — local-first AI with Claude escalation + MemPalace memory.
   cascade "do a task"   → single task, full agent pipeline
   cascade status        → agent + system dashboard
   cascade bot           → start Telegram bot
+  cascade watch         → run job + news watcher once
+  cascade brief         → send morning brief to Telegram
+  cascade reminders     → check due reminders + send alerts
+  cascade remind <text> → add a new reminder (natural language date)
   cascade skills        → list available skills
 """
 
@@ -37,6 +41,25 @@ def main():
     if args[0] == "watch":
         from cascade.watcher import run
         run()
+        return
+
+    if args[0] == "brief":
+        from cascade.brief import run
+        run()
+        return
+
+    if args[0] == "reminders":
+        from cascade.reminders import check_due
+        check_due()
+        return
+
+    if args[0] == "remind":
+        from cascade.reminders import add
+        text = " ".join(args[1:])
+        if not text:
+            print("Usage: cascade remind <text> (include date like 'Friday' or 'tomorrow')")
+        else:
+            print(add(text))
         return
 
     if args[0] == "skills":

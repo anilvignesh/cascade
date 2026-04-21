@@ -58,3 +58,9 @@ def detect_skill(query: str) -> str | None:
     name = q.split()[0][1:].lower()
     _load_all()
     return name if name in _registry else None
+
+
+def skill_exists(name: str) -> bool:
+    """Check if a skill is registered (used by route_query validation)."""
+    _load_all()
+    return name in _registry
