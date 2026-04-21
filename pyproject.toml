@@ -7,7 +7,10 @@ name = "cascade"
 version = "0.1.0"
 description = "Local-first AI coding agent with Claude escalation"
 requires-python = ">=3.10"
-dependencies = ["pyyaml>=6.0"]
+dependencies = [
+    "pyyaml>=6.0",
+    "python-telegram-bot>=20.0"
+]
 
 [project.scripts]
 cascade = "run:main"

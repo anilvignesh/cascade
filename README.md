@@ -18,53 +18,75 @@ Every message is automatically routed to the right model. You can override with 
 
 ## Architecture
 
-```
-User input (REPL or Telegram)
-       │
-       ▼  Qwen3 classifier (max_tokens=10, ~5s)
-       ├── local  → Qwen3 streams answer
-       ├── gemini → Gemini answers
-       └── claude → Claude Code CLI answers
-              │
-              ↓ (on uncertainty or iteration exhaustion)
-         escalation to Claude
+Cascade follows a tiered architecture designed for speed, cost-efficiency, and high-quality results.
+
+```mermaid
+graph TD
+    User([User]) --> Router{Qwen3 Router}
+    
+    Router -- Skill --> SkillRegistry[Skill Registry]
+    Router -- Local --> Qwen3[Local Qwen3:8b]
+    Router -- Gemini --> Gemini[Gemini CLI]
+    Router -- Coding --> AgentPipeline[Agent Pipeline]
+    
+    subgraph "Agent Pipeline"
+        Programmer[Programmer] --> Reviewer[Reviewer]
+        Reviewer -- Pass --> Tester[Tester]
+        Reviewer -- Fail --> Programmer
+        Tester -- Fail --> Programmer
+        Tester -- Stuck/Unsure --> Claude[Claude CLI]
+    end
+    
+    SkillRegistry --> MemPalace[(MemPalace KG)]
+    Qwen3 --> MemPalace
+    Gemini --> MemPalace
+    Claude --> MemPalace
 ```
 
-All responses are saved to MemPalace — shared memory across REPL, Telegram, and the agent pipeline.
+### Core Components
+
+- **Routing Layer (`llm.py`)**: Uses a fast Qwen3:8b model (local) to classify user intent. It decides whether to invoke a specific **Skill**, answer using **Gemini**, or escalate to the **Agent Pipeline**.
+- **Agent Pipeline (`agent.py`)**: A multi-role system (Programmer, Reviewer, Tester) that iterates on coding tasks. It uses local models for fast iteration but escalates to **Claude** if it gets stuck or the task is highly complex.
+- **Skill System (`skills/`)**: Pluggable modules for specific domains like Fintech news, job analysis, or Google Calendar integration.
+- **Memory Layer (`mempalace`)**: All interactions are indexed and stored in a shared Knowledge Graph, allowing Cascade to "remember" context across different sessions and interfaces.
 
 ---
 
 ## Interfaces
 
-### Terminal REPL
+### 1. Terminal REPL
+Interactive mode with streaming output.
 ```bash
 cascade
 ```
-Streaming output from Qwen3. Gemini and Claude responses print after completion.
+Supports forcing backends: `!!` for Claude, `!g` for Gemini.
 
-| Input | Action |
-|-------|--------|
-| `!! <query>` | Force Claude |
-| `!g <query>` | Force Gemini |
-| `/skill <args>` | Run a skill |
-| `history` | Last 10 queries |
-| `clear` | Clear session |
-| `exit` | Quit |
-
-### Single task (agent pipeline)
+### 2. Agent Pipeline (CLI)
+Directly execute complex coding tasks.
 ```bash
-cascade "build a rate limiter in Python"
-cascade "refactor utils.py to use dataclasses" --no-test
-cascade "architect a multi-tenant payment system" --escalate
+cascade "refactor auth.py to use JWT"
 ```
-Runs Programmer → Reviewer → Tester pipeline. Escalates to Claude on uncertainty.
 
-### Telegram bot
+### 3. Telegram Bot
+A full-featured coordinator for mobile access.
 ```bash
 cascade bot
 ```
-Full coordinator — handles text, voice, documents, photos. Same routing logic as REPL.
-System tasks (install, update, rm) require **"jarvis do it"** to confirm before execution.
+Handles text, voice, documents, and images.
+
+---
+
+## Agent Pipeline Details
+
+The pipeline uses a state machine to move between roles:
+
+| Role | Responsibility | Strategy |
+|------|----------------|----------|
+| **Programmer** | Implementation | Writes code, creates files, runs bash commands. |
+| **Reviewer** | Quality Control | Reads code, checks for logic errors and standards. |
+| **Tester** | Verification | Writes and executes tests to confirm functionality. |
+
+If the **Tester** fails repeatedly or the **Reviewer** identifies architectural uncertainty, the task is escalated to **Claude Code CLI** for high-tier reasoning.
 
 ### Background watcher (cron)
 Monitors jobs and news every 4 hours. Sends Telegram alerts for high-fit jobs and fintech news.
