@@ -1,0 +1,20 @@
+local_model: qwen3:8b
+ollama_url: http://localhost:11434/api/chat
+claude_bin: ~/.local/bin/claude
+
+escalation:
+  on_uncertainty: true
+  on_exhaustion: true
+  keywords:
+    - "i don't know"
+    - "i cannot"
+    - "i'm not sure"
+    - "unable to"
+
+roles:
+  programmer:
+    max_iters: 8
+  reviewer:
+    max_iters: 3
+  tester:
+    max_iters: 4
