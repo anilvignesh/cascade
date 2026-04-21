@@ -165,7 +165,7 @@ async def status_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def history_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _auth(update):
         return
-    from .repl import mem_search
+    from .memory import search as mem_search
     mem = mem_search("cascade recent")
     await update.message.reply_text(
         f"*Recent memory:*\n{mem[:1500]}" if mem else "No memory yet.",

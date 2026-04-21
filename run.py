@@ -11,6 +11,7 @@ Cascade — local-first AI with Claude escalation + MemPalace memory.
   cascade reminders     → check due reminders + send alerts
   cascade remind <text> → add a new reminder (natural language date)
   cascade skills        → list available skills
+  cascade learn         → analyse memory, update context.md with learned patterns
 """
 
 import sys
@@ -62,6 +63,11 @@ def main():
             print(add(text))
         return
 
+    if args[0] == "learn":
+        from cascade.learn import run as learn_run
+        learn_run()
+        return
+
     if args[0] == "skills":
         from cascade.skills import list_skills
         skills = list_skills()
@@ -107,7 +113,7 @@ def main():
             print(f"\n[{label}]\n")
             print(results[key])
 
-    backend = "Claude (escalated)" if results.get("escalated") else "Qwen3:8b (local)"
+    backend = "Claude (escalated)" if results.get("escalated") else "Gemini (general)"
     print(f"\n{'─' * 60}\n✓ {backend}\n")
 
 

@@ -227,6 +227,7 @@ cascade/
 │   ├── memory.py     # Three-layer memory (ROM / HDD / RAM)
 │   ├── learn.py      # Memory synthesis → context.md
 │   ├── repl.py       # Interactive REPL
+│   ├── init_cmd.py   # cascade init — auto-detect CLIs, write config
 │   ├── agent.py      # Programmer → Reviewer → Tester pipeline
 │   ├── roles.py      # Role definitions
 │   ├── tools.py      # Tool registry (bash, read, write, edit, glob, grep)
@@ -240,10 +241,10 @@ cascade/
 
 ## Roadmap
 
-- [ ] `cascade init` — auto-detect installed CLIs, generate config
-- [ ] Web search plugin (Tavily)
+- [x] `cascade init` — auto-detect installed CLIs, generate config
+- [x] Web search skill (Tavily + DuckDuckGo fallback)
+- [x] Document ingestion skill (markitdown — PDF, Word, Excel, images, HTML)
+- [x] `max_parallel` config option for rate limit control
 - [ ] Browser automation plugin (browser-use)
-- [ ] Document ingestion (markitdown)
 - [ ] Sandboxed code execution (E2B)
 - [ ] Advanced memory backends (mem0, Graphiti)
-- [ ] `max_parallel` config option for rate limit control

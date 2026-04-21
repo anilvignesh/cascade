@@ -1,20 +1,18 @@
 """
-Cascade interactive REPL — Rich UI with live token counter.
+Cascade interactive REPL — Rich UI, live token counter, input queue.
 """
 
-import re
+import re, sys, queue, threading
 from datetime import datetime
-from pathlib import Path
 
-from rich.console import Console
-from rich.live    import Live
-from rich.panel   import Panel
-from rich.spinner import Spinner
-from rich.text    import Text
+from rich.console  import Console
+from rich.live     import Live
+from rich.panel    import Panel
+from rich.spinner  import Spinner
 from rich.markdown import Markdown
 
-from .llm     import call_role_with_stats, get_role_provider, TokenStats
-from .memory  import load_context, recall, save, mempalace_save
+from .llm    import call_role_with_stats, get_role_provider, TokenStats
+from .memory import load_context, recall, save, mempalace_save
 from .profile import load as load_profile
 
 console = Console()
@@ -79,7 +77,8 @@ def route_query(raw: str) -> tuple[str, str, str]:
         )
         m = re.search(r'\{[^}]+\}', raw_response, re.DOTALL)
         if m:
-            data = json_parse(m.group())
+            import json
+            data = json.loads(m.group())
             t = data.get("type", "model")
             v = data.get("value", "gemini")
             a = str(data.get("args", ""))
@@ -94,11 +93,6 @@ def route_query(raw: str) -> tuple[str, str, str]:
     if any(w in lower for w in ("code", "script", "implement", "build", "refactor", "debug", "fix")):
         return ("model", "claude", q)
     return ("model", "gemini", q)
-
-
-def json_parse(s: str) -> dict:
-    import json
-    return json.loads(s)
 
 
 def _build_context(session_msgs: list[dict], memory: dict) -> str:
@@ -124,6 +118,24 @@ def _build_context(session_msgs: list[dict], memory: dict) -> str:
     return "\n\n".join(parts)
 
 
+def _print_session_summary(total: TokenStats):
+    console.print()
+    if total.total:
+        s = f"[dim]session total: {total.total:,} tokens"
+        if total.cost_usd:
+            s += f"  ${total.cost_usd:.4f}"
+        console.print(f"  {s}[/]")
+    console.print("[dim]bye[/]\n")
+
+
+def _prompt(is_busy: bool, queued: int) -> str:
+    if is_busy and queued:
+        return f"\033[2m  [{queued} queued] +\033[0m "
+    if is_busy:
+        return "\033[2m  [+]\033[0m "
+    return "\033[1m\033[92m›\033[0m "
+
+
 def run():
     console.print()
     console.print(Panel(
@@ -135,17 +147,38 @@ def run():
     ))
     console.print()
 
-    history:      list       = []
-    session_msgs: list       = []
-    session_total             = TokenStats()
+    history:       list       = []
+    session_msgs:  list       = []
+    session_total              = TokenStats()
+
+    # ── Input queue — background thread collects input, main thread processes ──
+    work_q   = queue.Queue()
+    is_busy  = threading.Event()
+
+    def _input_collector():
+        while True:
+            try:
+                sys.stdout.write(_prompt(is_busy.is_set(), work_q.qsize()))
+                sys.stdout.flush()
+                line = sys.stdin.readline()
+                if not line:
+                    work_q.put(None)
+                    break
+                work_q.put(line.rstrip("\n"))
+            except (EOFError, KeyboardInterrupt):
+                work_q.put(None)
+                break
+
+    threading.Thread(target=_input_collector, daemon=True).start()
 
     while True:
-        try:
-            raw = console.input("[bold green]›[/] ").strip()
-        except (EOFError, KeyboardInterrupt):
+        raw = work_q.get()
+
+        if raw is None:
             _print_session_summary(session_total)
             break
 
+        raw = raw.strip()
         if not raw:
             continue
         if raw.lower() in ("exit", "quit", "q"):
@@ -165,10 +198,17 @@ def run():
             console.print("[dim]cleared[/]\n")
             continue
 
+        is_busy.set()
+
         try:
             from .skills import run_skill, skill_exists
 
-            route_type, route_value, clean_query = route_query(raw)
+            # ── Immediate feedback — routing spinner shown before Gemini call ──
+            with Live(
+                Spinner("dots", text=" [dim]routing...[/]"),
+                console=console, refresh_per_second=12, transient=True
+            ):
+                route_type, route_value, clean_query = route_query(raw)
 
             if route_type == "skill" and not skill_exists(route_value):
                 route_type, route_value, clean_query = "model", "gemini", raw
@@ -176,8 +216,11 @@ def run():
             if route_type == "skill":
                 memory  = recall(clean_query or raw)
                 context = _build_context(session_msgs, memory)
-                console.print(f"  [dim]/{route_value}[/]\n")
-                response = run_skill(route_value, clean_query, context)
+                with Live(
+                    Spinner("dots", text=f" [dim]/{route_value}...[/]"),
+                    console=console, refresh_per_second=12, transient=True
+                ):
+                    response = run_skill(route_value, clean_query, context)
                 console.print(Panel(
                     Markdown(response),
                     title=f"[dim]/{route_value}[/]",
@@ -187,17 +230,17 @@ def run():
                 mempalace_save(raw, response, f"skill:{route_value}")
                 history.append((raw, response, f"skill:{route_value}"))
                 console.print()
+                is_busy.clear()
                 continue
 
-            memory  = recall(raw)
-            context = _build_context(session_msgs, memory)
-            role    = "coder" if route_value == "claude" else "researcher"
+            memory   = recall(raw)
+            context  = _build_context(session_msgs, memory)
+            role     = "coder" if route_value == "claude" else "researcher"
             provider = get_role_provider(role)
             style    = _PROVIDER_STYLE.get(provider, "dim")
             label    = route_value.capitalize()
 
-            # Spinner while waiting
-            response, stats = None, TokenStats()
+            # ── Model call spinner ──
             with Live(
                 Spinner("dots", text=f" [dim]{label} thinking...[/]"),
                 console=console, refresh_per_second=12, transient=True
@@ -205,8 +248,8 @@ def run():
                 response, stats = call_role_with_stats(role, clean_query, context)
 
             session_total = session_total + stats
-            tok_str      = _fmt_tokens(stats)
-            ses_str      = _fmt_session(session_total)
+            tok_str       = _fmt_tokens(stats)
+            ses_str       = _fmt_session(session_total)
 
             console.print(Panel(
                 Markdown(response),
@@ -215,7 +258,6 @@ def run():
                 border_style="dim",
                 padding=(1, 2),
             ))
-
             if ses_str:
                 console.print(f"  [dim]{ses_str}[/]")
             console.print()
@@ -233,14 +275,9 @@ def run():
             from rich.markup import escape
             console.print(f"[red]Error: {escape(str(e))}[/]\n")
 
+        is_busy.clear()
 
-def _print_session_summary(total: TokenStats):
-    console.print()
-    if total.total:
-        parts = [f"[dim]session total: {total.total:,} tokens"]
-        if total.cost_usd:
-            parts.append(f"${total.cost_usd:.4f}[/]")
-        else:
-            parts.append("[/]")
-        console.print("  " + "  ".join(parts))
-    console.print("[dim]bye[/]\n")
+        # Show how many are queued
+        queued = work_q.qsize()
+        if queued:
+            console.print(f"  [dim]{queued} queued[/]\n")

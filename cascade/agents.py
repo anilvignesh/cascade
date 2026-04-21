@@ -218,8 +218,10 @@ class Orchestrator:
                 idx, output = self._run_step(i, step, step_outputs, task, context, total)
                 step_outputs[idx] = output
             else:
-                # Run independent steps in parallel — each is its own subprocess
-                with ThreadPoolExecutor(max_workers=len(ready)) as pool:
+                cfg          = yaml.safe_load(_CONFIG_PATH.read_text())
+                max_parallel = cfg.get("orchestrator", {}).get("max_parallel", 3)
+                workers      = min(len(ready), max_parallel)
+                with ThreadPoolExecutor(max_workers=workers) as pool:
                     futures = {
                         pool.submit(self._run_step, i, s, step_outputs, task, context, total): i
                         for i, s in ready

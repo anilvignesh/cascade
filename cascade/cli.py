@@ -14,6 +14,7 @@ Cascade — local-first AI with Claude escalation + MemPalace memory.
   cascade learn         → analyse memory, update context.md with learned patterns
   cascade agent <name> "task" → run a named agent directly
   cascade agents        → list available agents
+  cascade init          → auto-detect CLIs, write config.yml
 """
 
 import sys
@@ -60,6 +61,11 @@ def main():
             print("Usage: cascade remind <text> (include date like 'Friday' or 'tomorrow')")
         else:
             print(add(text))
+        return
+
+    if args[0] == "init":
+        from cascade.init_cmd import run as init_run
+        init_run()
         return
 
     if args[0] == "agents":

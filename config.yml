@@ -62,6 +62,9 @@ agents:
     max_iters: 5
     system_prompt: "You are an analyst. Synthesise data, identify patterns, produce structured insights."
 
+orchestrator:
+  max_parallel: 3   # max simultaneous agent subprocesses
+
 memory:
   backend:      file
   path:         ~/.cascade/memory.md
