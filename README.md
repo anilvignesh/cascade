@@ -1,231 +1,249 @@
 # Cascade
 
-> A local-first AI assistant and coding agent — Qwen3 for speed, Gemini for research, Claude for hard coding.
+A multi-model AI orchestration framework. Route tasks to the right model, share context and memory across all of them, and let them work in parallel — without API keys.
+
+Cascade runs on CLI subscriptions (Gemini, Claude) and local models (Ollama). Add a model by editing one config file.
 
 ---
 
-## What It Is
+## How it works
 
-Cascade is a personal AI system built around three models in a smart routing layer:
+```
+cascade "research X and build Y"
+              ↓
+    Gemini (interpreter)
+    plans the task, assigns agents
+              ↓
+    ┌─────────────────┬──────────────────┐
+    │  researcher     │  analyst         │  ← parallel subprocesses
+    │  (Gemini CLI)   │  (Gemini CLI)    │
+    └─────────────────┴──────────────────┘
+              ↓
+    coder (Claude CLI) ← if implementation needed
+              ↓
+    Gemini synthesises → single final response
+```
 
-- **Qwen3:8b** (local via Ollama) — free, private, instant for simple queries
-- **Gemini** (Google CLI, OAuth) — research, analysis, news, job briefings, conversation
-- **Claude** (Claude Code CLI, Pro sub) — complex coding, architecture, implementation
+Every model call gets the same injected context:
 
-Every message is automatically routed to the right model. You can override with `!!` (Claude) or `!g` (Gemini).
+| Layer | File | Role |
+|---|---|---|
+| ROM | `~/.cascade/context.md` | Persistent facts — you write this once |
+| HDD | `~/.cascade/memory.md` | Past Q&A, keyword-searched automatically |
+| RAM | MemPalace (optional) | Semantic graph memory, if installed |
 
 ---
 
-## Architecture
+## Prerequisites
 
-Cascade follows a tiered architecture designed for speed, cost-efficiency, and high-quality results.
+At least one of:
 
-```mermaid
-graph TD
-    User([User]) --> Router{Qwen3 Router}
-    
-    Router -- Skill --> SkillRegistry[Skill Registry]
-    Router -- Local --> Qwen3[Local Qwen3:8b]
-    Router -- Gemini --> Gemini[Gemini CLI]
-    Router -- Coding --> AgentPipeline[Agent Pipeline]
-    
-    subgraph "Agent Pipeline"
-        Programmer[Programmer] --> Reviewer[Reviewer]
-        Reviewer -- Pass --> Tester[Tester]
-        Reviewer -- Fail --> Programmer
-        Tester -- Fail --> Programmer
-        Tester -- Stuck/Unsure --> Claude[Claude CLI]
-    end
-    
-    SkillRegistry --> MemPalace[(MemPalace KG)]
-    Qwen3 --> MemPalace
-    Gemini --> MemPalace
-    Claude --> MemPalace
-```
+| Model | Requirement |
+|---|---|
+| **Gemini CLI** | [Install](https://github.com/google-gemini/gemini-cli) — Google account or Google One subscription |
+| **Claude CLI** | [Install](https://claude.ai/code) — Anthropic subscription |
+| **Ollama** | [Install](https://ollama.com) — local hardware (8GB+ RAM recommended) |
 
-### Core Components
-
-- **Routing Layer (`llm.py`)**: Uses a fast Qwen3:8b model (local) to classify user intent. It decides whether to invoke a specific **Skill**, answer using **Gemini**, or escalate to the **Agent Pipeline**.
-- **Agent Pipeline (`agent.py`)**: A multi-role system (Programmer, Reviewer, Tester) that iterates on coding tasks. It uses local models for fast iteration but escalates to **Claude** if it gets stuck or the task is highly complex.
-- **Skill System (`skills/`)**: Pluggable modules for specific domains like Fintech news, job analysis, or Google Calendar integration.
-- **Memory Layer (`mempalace`)**: All interactions are indexed and stored in a shared Knowledge Graph, allowing Cascade to "remember" context across different sessions and interfaces.
-
----
-
-## Interfaces
-
-### 1. Terminal REPL
-Interactive mode with streaming output.
-```bash
-cascade
-```
-Supports forcing backends: `!!` for Claude, `!g` for Gemini.
-
-### 2. Agent Pipeline (CLI)
-Directly execute complex coding tasks.
-```bash
-cascade "refactor auth.py to use JWT"
-```
-
-### 3. Telegram Bot
-A full-featured coordinator for mobile access.
-```bash
-cascade bot
-```
-Handles text, voice, documents, and images.
-
----
-
-## Agent Pipeline Details
-
-The pipeline uses a state machine to move between roles:
-
-| Role | Responsibility | Strategy |
-|------|----------------|----------|
-| **Programmer** | Implementation | Writes code, creates files, runs bash commands. |
-| **Reviewer** | Quality Control | Reads code, checks for logic errors and standards. |
-| **Tester** | Verification | Writes and executes tests to confirm functionality. |
-
-If the **Tester** fails repeatedly or the **Reviewer** identifies architectural uncertainty, the task is escalated to **Claude Code CLI** for high-tier reasoning.
-
-### Background watcher (cron)
-Monitors jobs and news every 4 hours. Sends Telegram alerts for high-fit jobs and fintech news.
-
-### Daily brief
-```bash
-cascade brief
-```
-Morning briefing sent to Telegram — news + job digest.
-
----
-
-## Skills
-
-| Skill | Backend | What it does |
-|-------|---------|-------------|
-| `/news` | Gemini | Curated fintech briefing — picks what matters to you, explains why |
-| `/jobs` | Gemini | Analyses high-fit jobs — what to apply for, what to highlight, what gaps exist |
-| `/email inbox` | Gemini + Claude | Summarises inbox; reads full thread before drafting replies |
-| `/email reply <subject>: <intent>` | Claude | Reads full thread context, drafts in your voice |
-| `/calendar today/week/free/add` | Claude | Google Calendar read and create |
-| `/browse <url or query>` | — | Fetch URL or web search |
-| `/match` | Claude | Match resume against cached job listings |
-| `/remind <text>` | — | Natural language reminders |
-| `/system` | Qwen3 | RAM, disk, Ollama, Gemini, MemPalace, Cascade status |
-| `/plan trip <destination>` | Gemini | Visa, areas, itinerary, budget |
-| `/plan research <company/topic>` | Gemini | Deep brief with fresh web data |
-| `/plan interview <company> [role]` | Gemini | Fit analysis, likely questions, talking points |
-| `/plan meeting <person/topic>` | Gemini | Agenda, context, what to push for |
-| `/graphify <text>` | — | Save to MemPalace knowledge graph |
-
----
-
-## Agent Pipeline
-
-Used for coding tasks (`cascade "task"`):
-
-| Role | Tools | Max iterations | Escalates when |
-|------|-------|---------------|----------------|
-| Programmer | bash, read, write, edit, glob, grep | 8 | Uncertain or stuck |
-| Reviewer | read, glob, grep (read-only) | 3 | Uncertain about quality |
-| Tester | bash, read, glob | 4 | Tests fail repeatedly |
-
-Tool call formats supported: XML (`<tool>`), function XML (`<function>`), JSON object, markdown bash blocks.
-
----
-
-## Memory
-
-All exchanges (REPL, Telegram, skills) are saved to MemPalace at `~/.mempalace/palace`.
-Sessions from `~/.claude/projects/` are mined into MemPalace on every Claude Code exit.
-
-Both Cascade and Claude Code share the same memory store — context flows between them.
-
----
-
-## Configuration
-
-**`config.yml`** — model and escalation settings:
-```yaml
-local_model: qwen3:8b      # swap to qwen3:32b after 64GB RAM upgrade
-```
-
-**`~/.cascade.env`** — secrets:
-```
-TELEGRAM_TOKEN=...
-TELEGRAM_CHAT_ID=...
-```
-
-**`~/.gemini/settings.json`** — Gemini OAuth (auto-configured on first `gemini` login).
+Python 3.10+
 
 ---
 
 ## Setup
 
-**Requirements:**
-- [Ollama](https://ollama.ai) with `qwen3:8b` pulled
-- [Claude Code CLI](https://claude.ai/code) authenticated (Pro subscription)
-- [Gemini CLI](https://github.com/google-gemini/gemini-cli) authenticated (Google account)
-
 ```bash
-# Clone
-git clone https://github.com/anilvignesh/cascade
+git clone https://github.com/anilvignesh/cascade.git
 cd cascade
 pip install -e .
+```
 
-# Pull local model
-ollama pull qwen3:8b
+Create your persistent context file:
 
-# Authenticate Gemini (one-time)
-gemini
-
-# Run
-cascade
+```bash
+mkdir -p ~/.cascade
+nano ~/.cascade/context.md
+# Write anything you want injected into every model call.
+# Example: "I'm a backend engineer. Always use Python. Be concise."
 ```
 
 ---
 
-## Hardware
+## Usage
 
-Current: AMD Ryzen 5 7530U, 16GB DDR4 3200MHz, 476GB NVMe.
+```bash
+cascade                            # interactive REPL
+cascade "do something"             # orchestrator — plans + runs agents + synthesises
+cascade agent <name> "task"        # run a specific agent directly
+cascade agents                     # list available agents
+cascade learn                      # synthesise memory → update context.md
+cascade skills                     # list installed skills
+```
 
-At 16GB, Qwen3:8b runs in ~90s/call and Claude escalation happens often. After upgrading to 64GB RAM, swap to `qwen3:32b` in `config.yml` — response time drops to ~30s and most tasks stay local.
+**REPL shortcuts:**
+- `!! task` — force Claude
+- `!g task` — force Gemini
+- `/skillname args` — run a skill
+- `history` — show recent queries
+- `clear` — reset session context
 
 ---
 
-## Project Structure
+## Configuration
+
+Everything lives in `config.yml`:
+
+```yaml
+providers:
+  gemini:
+    type: cli
+    bin: ~/.local/bin/gemini
+    prompt_flag: "-p"
+    args: ["--yolo"]
+
+  claude:
+    type: cli
+    bin: ~/.local/bin/claude
+    prompt_flag: "-p"
+    args: ["--allowedTools", "Bash,Read,Write,Edit,Glob,Grep", "--dangerously-skip-permissions"]
+
+  # Uncomment to enable local model (requires Ollama)
+  # local:
+  #   type: ollama
+  #   model: llama3:8b
+  #   url: http://localhost:11434/api/chat
+
+roles:
+  interpreter: gemini   # routes intent, orchestrates
+  coder:       claude   # code, architecture, debugging
+  researcher:  gemini   # research, analysis, drafting
+  general:     gemini   # fallback
+
+permissions:
+  gemini:
+    can_read_files:    false
+    can_write_files:   false
+    can_run_commands:  false
+    can_access_memory: true
+  claude:
+    can_read_files:    true
+    can_write_files:   true
+    can_run_commands:  true
+    can_access_memory: true
+```
+
+---
+
+## Adding a model
+
+Any model with a CLI or API can be added:
+
+```yaml
+# Local via Ollama
+providers:
+  local:
+    type: ollama
+    model: llama3:70b
+    url: http://localhost:11434/api/chat
+
+# API-based (optional)
+  openai:
+    type: api
+    provider: openai
+    model: gpt-4o
+    api_key_env: OPENAI_API_KEY
+
+# Assign to a role
+roles:
+  general: local
+```
+
+---
+
+## Agents
+
+Agents are autonomous workers with a think → act → observe loop. Define them in `config.yml`:
+
+```yaml
+agents:
+  researcher:
+    role: researcher
+    tools: [bash, read_file, glob, grep]
+    max_iters: 6
+    system_prompt: "You are a research agent. Gather and summarise information clearly."
+
+  coder:
+    role: coder
+    tools: [bash, read_file, write_file, edit_file, glob, grep]
+    max_iters: 10
+    system_prompt: "You are a coding agent. Implement tasks fully. Output DONE when complete."
+```
+
+The orchestrator (`cascade "task"`) automatically plans which agents to use, runs independent steps in parallel, and synthesises the result.
+
+Run an agent directly:
+
+```bash
+cascade agent researcher "how does SWIFT gpi work"
+cascade agent coder "write a python script to parse CSV files"
+```
+
+---
+
+## Learning
+
+Cascade synthesises patterns from your interaction history and writes them into `context.md` as a `[LEARNED]` block. Your manually written content is never touched.
+
+```bash
+cascade learn
+```
+
+Schedule it nightly:
+
+```bash
+# crontab -e
+0 2 * * * /path/to/cascade learn >> ~/.cascade/learn.log 2>&1
+```
+
+---
+
+## Skills
+
+Skills are pluggable modules in `cascade/skills/<name>/skill.py`. Each exposes a `DESCRIPTION` string and a `run(query, context)` function.
+
+```bash
+cascade skills        # list installed skills
+/skillname args       # invoke from the REPL
+```
+
+---
+
+## Project structure
 
 ```
 cascade/
 ├── cascade/
-│   ├── llm.py            # Three backends: call_local, call_gemini, call_claude
-│   ├── repl.py           # Interactive REPL with streaming Qwen3
-│   ├── agent.py          # Coding agent loop — Programmer → Reviewer → Tester
-│   ├── telegram_bot.py   # Telegram coordinator — text, voice, docs, photos
-│   ├── tools.py          # Tool registry (bash, read, write, edit, grep, glob)
-│   ├── roles.py          # Role definitions + system prompts
-│   ├── skills.py         # Skills loader
-│   ├── watcher.py        # Background job + news watcher
-│   ├── brief.py          # Daily brief generator
-│   └── state.py          # Agent state machine
-├── skills/
-│   ├── news/             # Gemini-powered fintech briefing
-│   ├── jobs/             # Gemini job fit analysis
-│   ├── email/            # Claude email agent (full thread context)
-│   ├── calendar/         # Google Calendar
-│   ├── browse/           # Web fetch + search
-│   ├── match/            # Resume-job matching
-│   ├── remind/           # Reminders
-│   ├── system/           # Laptop health
-│   └── graphify/         # MemPalace KG
-├── config.yml
-├── run.py
-└── .agent/
-    └── worker-state.json # Live agent state
+│   ├── cli.py        # Entry point — all subcommands
+│   ├── llm.py        # Provider registry (CLI / Ollama / API transports)
+│   ├── agents.py     # Agent class + Orchestrator with parallel execution
+│   ├── memory.py     # Three-layer memory (ROM / HDD / RAM)
+│   ├── learn.py      # Memory synthesis → context.md
+│   ├── repl.py       # Interactive REPL
+│   ├── agent.py      # Programmer → Reviewer → Tester pipeline
+│   ├── roles.py      # Role definitions
+│   ├── tools.py      # Tool registry (bash, read, write, edit, glob, grep)
+│   └── skills.py     # Skills loader
+├── skills/           # Pluggable skill modules
+├── config.yml        # All configuration
+└── pyproject.toml
 ```
 
 ---
 
-## Author
+## Roadmap
 
-Built by [Anil Vignesh](https://github.com/anilvignesh) — Senior PM in cross-border payments.
+- [ ] `cascade init` — auto-detect installed CLIs, generate config
+- [ ] Web search plugin (Tavily)
+- [ ] Browser automation plugin (browser-use)
+- [ ] Document ingestion (markitdown)
+- [ ] Sandboxed code execution (E2B)
+- [ ] Advanced memory backends (mem0, Graphiti)
+- [ ] `max_parallel` config option for rate limit control

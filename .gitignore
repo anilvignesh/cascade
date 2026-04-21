@@ -3,6 +3,10 @@ __pycache__/
 *.pyc
 *.pyo
 .env
+*.env
+.env*
 *.egg-info/
 dist/
 build/
+.cascade/
+*.log

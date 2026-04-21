@@ -1,20 +1,65 @@
-local_model: qwen3:8b
-ollama_url: http://localhost:11434/api/chat
-claude_bin: ~/.local/bin/claude
-
-escalation:
-  on_uncertainty: true
-  on_exhaustion: true
-  keywords:
-    - "i don't know"
-    - "i cannot"
-    - "i'm not sure"
-    - "unable to"
+providers:
+  gemini:
+    type: cli
+    bin: ~/.local/bin/gemini
+    prompt_flag: "-p"
+    args: ["--yolo"]
+  claude:
+    type: cli
+    bin: ~/.local/bin/claude
+    prompt_flag: "-p"
+    args: ["--allowedTools", "Bash,Read,Write,Edit,Glob,Grep", "--dangerously-skip-permissions"]
+  # local:
+  #   type: ollama
+  #   model: gemma3
+  #   url: http://localhost:11434/api/chat
 
 roles:
-  programmer:
-    max_iters: 8
+  interpreter: gemini   # routing, intent classification
+  coder:       claude   # implementation, debugging, architecture
+  researcher:  gemini   # research, analysis, drafting
+  general:     gemini   # fallback for everything else
+
+permissions:
+  gemini:
+    can_read_files:    false
+    can_write_files:   false
+    can_run_commands:  false
+    can_access_memory: true
+    can_call_models:   false
+  claude:
+    can_read_files:    true
+    can_write_files:   true
+    can_run_commands:  true
+    can_access_memory: true
+    can_call_models:   false
+
+agents:
+  researcher:
+    role: researcher
+    tools: [bash, read_file, glob, grep]
+    max_iters: 6
+    system_prompt: "You are a research agent. Gather information, analyse, and summarise clearly."
+
+  coder:
+    role: coder
+    tools: [bash, read_file, write_file, edit_file, glob, grep]
+    max_iters: 10
+    system_prompt: "You are a coding agent. Implement tasks fully using tools. Output DONE when complete."
+
   reviewer:
-    max_iters: 3
-  tester:
+    role: researcher
+    tools: [read_file, glob, grep]
     max_iters: 4
+    system_prompt: "You are a reviewer. Read code, verify correctness. Output APPROVED or CHANGES: <feedback>."
+
+  analyst:
+    role: researcher
+    tools: [read_file, bash]
+    max_iters: 5
+    system_prompt: "You are an analyst. Synthesise data, identify patterns, produce structured insights."
+
+memory:
+  backend:      file
+  path:         ~/.cascade/memory.md
+  context_file: ~/.cascade/context.md

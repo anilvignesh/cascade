@@ -1,173 +1,151 @@
 """
-LLM backends — three-tier architecture.
-- Local:  Qwen3 via Ollama (streaming + batch) — free, private
-- Gemini: Gemini CLI — research, analysis, conversation, long context
-- Claude: Claude Code CLI — complex coding, architecture, implementation
+LLM provider registry — config-driven, transport-agnostic.
+
+Transports:
+  cli    — subprocess call to a CLI binary (Gemini, Claude)
+  ollama — local model via Ollama HTTP API
+  api    — direct API access (optional, requires key)
+
+Entry point: call_role(role, prompt, context)
 """
 
-import json, subprocess, urllib.request
+import json, subprocess, urllib.request, yaml
 from pathlib import Path
 from typing import Iterator
 
-OLLAMA_URL  = "http://localhost:11434/api/chat"
-LOCAL_MODEL = "qwen3:8b"
-CLAUDE_BIN  = str(Path.home() / ".local" / "bin" / "claude")
-GEMINI_BIN  = str(Path.home() / ".local" / "bin" / "gemini")
-
+CONFIG_PATH  = Path(__file__).parent.parent / "config.yml"
 ENGLISH_RULE = "IMPORTANT: Always respond in English only."
 
-
-def _build_messages(messages: list[dict]) -> list[dict]:
-    system = next((m["content"] for m in messages if m["role"] == "system"), "")
-    return [
-        {"role": "system", "content": f"{system}\n\n{ENGLISH_RULE}".strip()},
-        *[m for m in messages if m["role"] != "system"]
-    ]
+_config:    dict = {}
+_registry:  dict = {}
 
 
-def call_local(messages: list[dict], max_tokens: int = 2048, timeout: int = 300) -> str:
-    payload = json.dumps({
-        "model": LOCAL_MODEL,
-        "messages": _build_messages(messages),
-        "stream": False,
-        "options": {"num_predict": max_tokens, "temperature": 0.2},
-    }).encode()
-    req = urllib.request.Request(
-        OLLAMA_URL, data=payload,
-        headers={"Content-Type": "application/json"}
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read())["message"]["content"].strip()
+# ── Config ────────────────────────────────────────────────────────────────────
+
+def _load_config() -> dict:
+    global _config
+    if not _config:
+        _config = yaml.safe_load(CONFIG_PATH.read_text())
+    return _config
 
 
-def call_local_stream(messages: list[dict], max_tokens: int = 1024,
-                      timeout: int = 300) -> Iterator[str]:
-    """Streaming Qwen3 — yields text chunks as they arrive."""
-    payload = json.dumps({
-        "model": LOCAL_MODEL,
-        "messages": _build_messages(messages),
-        "stream": True,
-        "options": {"num_predict": max_tokens, "temperature": 0.2},
-    }).encode()
-    req = urllib.request.Request(
-        OLLAMA_URL, data=payload,
-        headers={"Content-Type": "application/json"}
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        for line in resp:
-            if line.strip():
-                chunk = json.loads(line.decode())
-                if not chunk.get("done") and "message" in chunk:
-                    yield chunk["message"]["content"]
+# ── Providers ─────────────────────────────────────────────────────────────────
+
+class CLIProvider:
+    def __init__(self, cfg: dict):
+        self.bin         = str(Path(cfg["bin"]).expanduser())
+        self.prompt_flag = cfg.get("prompt_flag")
+        self.args        = cfg.get("args", [])
+
+    def call(self, prompt: str, context: str = "", timeout: int = 120) -> str:
+        full = f"{context}\n\n{prompt}".strip() if context else prompt
+        cmd  = [self.bin]
+        if self.prompt_flag:
+            cmd += [self.prompt_flag, full]
+        else:
+            cmd.append(full)
+        cmd += self.args
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        output = proc.stdout.strip() or proc.stderr.strip()
+        lines  = [l for l in output.splitlines()
+                  if not l.lower().startswith(("yolo mode", "✻ welcome"))]
+        return "\n".join(lines).strip()
 
 
-def call_gemini(prompt: str, context: str = "", timeout: int = 120) -> str:
-    """Call Gemini CLI in headless mode (-p flag)."""
-    full = f"{context}\n\n{prompt}".strip() if context else prompt
-    proc = subprocess.run(
-        [GEMINI_BIN, "-p", full, "--yolo"],
-        capture_output=True, text=True, timeout=timeout
-    )
-    output = proc.stdout.strip() or proc.stderr.strip()
-    # Strip YOLO mode banner lines that Gemini CLI prints to stdout
-    lines = [l for l in output.splitlines()
-             if not l.startswith("YOLO mode")]
-    return "\n".join(lines).strip()
+class OllamaProvider:
+    def __init__(self, cfg: dict):
+        self.model = cfg["model"]
+        self.url   = cfg.get("url", "http://localhost:11434/api/chat")
+
+    def _messages(self, prompt: str, context: str) -> list[dict]:
+        msgs = []
+        if context:
+            msgs.append({"role": "system", "content": f"{context}\n\n{ENGLISH_RULE}"})
+        msgs.append({"role": "user", "content": prompt})
+        return msgs
+
+    def call(self, prompt: str, context: str = "", timeout: int = 300) -> str:
+        payload = json.dumps({
+            "model":   self.model,
+            "messages": self._messages(prompt, context),
+            "stream":  False,
+            "options": {"num_predict": 2048, "temperature": 0.2},
+        }).encode()
+        req = urllib.request.Request(
+            self.url, data=payload,
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read())["message"]["content"].strip()
+
+    def stream(self, prompt: str, context: str = "", timeout: int = 300) -> Iterator[str]:
+        payload = json.dumps({
+            "model":   self.model,
+            "messages": self._messages(prompt, context),
+            "stream":  True,
+            "options": {"num_predict": 1024, "temperature": 0.2},
+        }).encode()
+        req = urllib.request.Request(
+            self.url, data=payload,
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            for line in resp:
+                if line.strip():
+                    chunk = json.loads(line.decode())
+                    if not chunk.get("done") and "message" in chunk:
+                        yield chunk["message"]["content"]
 
 
-def route_query(query: str) -> tuple[str, str, str]:
-    """Route a raw user query. Returns (type, value, clean_query).
+class APIProvider:
+    """Stub for API-based providers (Anthropic, OpenAI, etc.)"""
+    def __init__(self, cfg: dict):
+        self.provider    = cfg["provider"]
+        self.model       = cfg["model"]
+        self.api_key_env = cfg.get("api_key_env")
 
-    Explicit prefixes are resolved first (no LLM call):
-      !!query  → ("model", "claude",  query)
-      !g query → ("model", "gemini",  query)
-      /skill … → ("skill", name,      args)
-
-    Everything else goes through Qwen3 for natural-language routing:
-      type="skill"  → value=skill_name,          clean_query=args string
-      type="model"  → value=local/gemini/claude,  clean_query=query text
-    """
-    import re as _re
-
-    q = query.strip()
-
-    # Hard overrides — no LLM needed
-    if q.startswith("!!"):
-        return ("model", "claude", q[2:].strip())
-    if q.startswith("!g"):
-        return ("model", "gemini", q[2:].strip())
-    if q.startswith("/"):
-        name = q.split()[0][1:].lower()
-        args = " ".join(q.split()[1:])
-        return ("skill", name, args)
-
-    # Natural-language routing via Qwen3 (max_tokens=60 keeps it fast)
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "Route user messages. Reply with JSON only — no explanation.\n"
-                "Skills available: plan, draft, jobs, news, email, remind, "
-                "calendar, system, match, browse, graphify\n"
-                "Models:\n"
-                "  local  — ONLY for trivial one-liners: maths, date/time, yes/no, unit conversion\n"
-                "  gemini — everything else: explanations, fintech, payments, stablecoins, crypto, "
-                "market trends, company info, analysis, comparisons, general knowledge, conversation\n"
-                "  claude — coding, implementing, building, refactoring, debugging, writing scripts\n\n"
-                "When in doubt, use gemini not local.\n\n"
-                'Examples:\n'
-                '"research Airwallex"            → {"type":"skill","value":"plan","args":"research Airwallex"}\n'
-                '"plan my trip to Dubai"         → {"type":"skill","value":"plan","args":"trip Dubai"}\n'
-                '"what jobs should I apply for"  → {"type":"skill","value":"jobs","args":""}\n'
-                '"write a PRD for payments"      → {"type":"skill","value":"draft","args":"prd payments"}\n'
-                '"draft a cover letter for Nium" → {"type":"skill","value":"draft","args":"cover Nium"}\n'
-                '"how do stablecoins work"       → {"type":"model","value":"gemini","args":""}\n'
-                '"explain SWIFT vs correspondent banking" → {"type":"model","value":"gemini","args":""}\n'
-                '"what is RBI PA-CB"             → {"type":"model","value":"gemini","args":""}\n'
-                '"write a python script"         → {"type":"model","value":"claude","args":""}\n'
-                '"what is 15% of 200"            → {"type":"model","value":"local","args":""}\n'
-                '"what time is it"               → {"type":"model","value":"local","args":""}'
-            ),
-        },
-        {"role": "user", "content": q},
-    ]
-    try:
-        raw = call_local(messages, max_tokens=60, timeout=30).strip()
-        m   = _re.search(r'\{[^}]+\}', raw, _re.DOTALL)
-        if m:
-            data = json.loads(m.group())
-            t    = data.get("type", "model")
-            v    = data.get("value", "gemini")
-            a    = str(data.get("args", ""))
-            if t == "skill":
-                return ("skill", v.lower(), a)
-            if v in ("claude", "gemini", "local"):
-                return ("model", v, q)
-    except Exception:
-        pass
-
-    # Fallback: keyword-based model routing
-    lower = q.lower()
-    if any(w in lower for w in ("code", "script", "implement", "build", "refactor", "debug", "fix bug")):
-        return ("model", "claude", q)
-    return ("model", "gemini", q)
+    def call(self, prompt: str, context: str = "", timeout: int = 120) -> str:
+        raise NotImplementedError(
+            f"API provider '{self.provider}' not configured. "
+            f"Set {self.api_key_env} and implement the transport."
+        )
 
 
-def classify_query(query: str) -> str:
-    """Legacy wrapper — use route_query() for new code."""
-    _, backend, _ = route_query(query)
-    return backend
+# ── Registry ──────────────────────────────────────────────────────────────────
+
+def _get_registry() -> dict:
+    global _registry
+    if _registry:
+        return _registry
+    for name, pcfg in _load_config().get("providers", {}).items():
+        t = pcfg.get("type")
+        if   t == "cli":    _registry[name] = CLIProvider(pcfg)
+        elif t == "ollama": _registry[name] = OllamaProvider(pcfg)
+        elif t == "api":    _registry[name] = APIProvider(pcfg)
+    return _registry
 
 
-def call_claude(prompt: str, context: str = "") -> str:
-    full = f"{context}\n\n{prompt}".strip() if context else prompt
-    proc = subprocess.run(
-        [CLAUDE_BIN, "-p", full,
-         "--allowedTools", "Bash,Read,Write,Edit,Glob,Grep",
-         "--dangerously-skip-permissions"],
-        capture_output=True, text=True, timeout=300
-    )
-    return proc.stdout.strip() or proc.stderr.strip()
+# ── Public API ────────────────────────────────────────────────────────────────
+
+def call_role(role: str, prompt: str, context: str = "") -> str:
+    cfg         = _load_config()
+    provider_id = cfg.get("roles", {}).get(role)
+    if not provider_id:
+        raise ValueError(f"No provider assigned to role '{role}'")
+    provider = _get_registry().get(provider_id)
+    if not provider:
+        raise ValueError(f"Provider '{provider_id}' not found — check config.yml")
+    return provider.call(prompt, context)
+
+
+def get_role_provider(role: str) -> str:
+    return _load_config().get("roles", {}).get(role, "gemini")
+
+
+def has_permission(role: str, permission: str) -> bool:
+    cfg         = _load_config()
+    provider_id = cfg.get("roles", {}).get(role, "gemini")
+    return cfg.get("permissions", {}).get(provider_id, {}).get(permission, False)
 
 
 def should_escalate(response: str, iteration: int, max_iters: int) -> bool:
@@ -175,6 +153,13 @@ def should_escalate(response: str, iteration: int, max_iters: int) -> bool:
         "i don't know", "i cannot", "i'm not sure", "i am not sure",
         "unable to", "i lack", "beyond my", "i don't have access",
     ]
-    low_confidence = any(p in response.lower() for p in uncertainty)
-    stuck = iteration >= max_iters - 1
-    return low_confidence or stuck
+    return any(p in response.lower() for p in uncertainty) or iteration >= max_iters - 1
+
+
+# ── Legacy shims (used by agent.py / repl.py) ─────────────────────────────────
+
+def call_claude(prompt: str, context: str = "") -> str:
+    return call_role("coder", prompt, context)
+
+def call_gemini(prompt: str, context: str = "") -> str:
+    return call_role("researcher", prompt, context)

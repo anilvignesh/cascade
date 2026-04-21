@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
-cascade = "run:main"
+cascade = "cascade.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

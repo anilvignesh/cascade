@@ -1,34 +1,27 @@
 """
-Core agent loop.
-Programmer → Reviewer → Tester pipeline.
-Each role runs locally (Qwen3). Escalates to Claude on uncertainty or failure.
+Core agent loop — Programmer → Reviewer → Tester pipeline.
+Each role calls the model assigned to it in config.yml.
+Escalates to the 'coder' role (Claude) on uncertainty or failure.
 """
 
 import json, re
-from .state  import WorkerState, Status
-from .roles  import PROGRAMMER, REVIEWER, TESTER, Role
-from .tools  import execute, REGISTRY
-from .llm    import call_local, call_claude, should_escalate  # noqa: F401
+from .state import WorkerState, Status
+from .roles import PROGRAMMER, REVIEWER, TESTER, Role
+from .tools import execute, REGISTRY
+from .llm   import call_role, should_escalate
 
 
-# Multiple patterns in priority order — Qwen3 is inconsistent with format
 _PATTERNS = [
-    # Primary: <tool>name</tool><args>{...}</args>
     re.compile(r'<tool>\s*(\w+)\s*</tool>\s*<args>(.*?)</args>', re.DOTALL),
-    # Alternate XML: <function name="tool">...</function>
     re.compile(r'<function\s+name=["\'](\w+)["\'][^>]*>(.*?)</function>', re.DOTALL),
-    # JSON object: {"tool": "name", "args": {...}}
     re.compile(r'\{\s*"tool"\s*:\s*"(\w+)"\s*,\s*"args"\s*:\s*(\{.*?\})\s*\}', re.DOTALL),
 ]
-
-# Markdown code block → bash tool fallback
 _BASH_BLOCK = re.compile(r'```(?:bash|sh|shell)\n(.*?)```', re.DOTALL)
 
 
 def parse_tool_calls(text: str) -> list[tuple[str, dict]]:
-    calls = []
-
     for pattern in _PATTERNS:
+        calls = []
         for m in pattern.finditer(text):
             name = m.group(1).strip()
             if name not in REGISTRY:
@@ -41,66 +34,62 @@ def parse_tool_calls(text: str) -> list[tuple[str, dict]]:
         if calls:
             return calls
 
-    # Fallback: markdown bash blocks → bash tool
-    for m in _BASH_BLOCK.finditer(text):
-        command = m.group(1).strip()
-        if command:
-            calls.append(("bash", {"command": command}))
+    return [
+        ("bash", {"command": m.group(1).strip()})
+        for m in _BASH_BLOCK.finditer(text)
+        if m.group(1).strip()
+    ]
 
-    return calls
+
+def _build_context(role: Role, task: str, transcript: list[str], initial_context: str) -> str:
+    parts = [role.system_prompt]
+    if initial_context:
+        parts.append(f"Context:\n{initial_context}")
+    parts.append(f"Task:\n{task}")
+    if transcript:
+        parts.append("Conversation so far:\n" + "\n".join(transcript))
+    return "\n\n".join(parts)
 
 
 def run_role(role: Role, task: str, state: WorkerState, context: str = "") -> tuple[str, bool]:
     """Run one role's loop. Returns (final_response, escalated)."""
-    messages = [{"role": "system", "content": role.system_prompt}]
-    if context:
-        messages.append({"role": "user", "content": f"Context:\n{context}"})
-    messages.append({"role": "user", "content": task})
+    transcript: list[str] = []
 
     for i in range(role.max_iters):
-        state.transition(Status.PROCESSING, backend="local", iteration=i)
+        state.transition(Status.PROCESSING, backend=role.name, iteration=i)
+
+        ctx = _build_context(role, task, transcript, context)
+        prompt = transcript[-1] if transcript else task
 
         try:
-            response = call_local(messages, max_tokens=2048)
+            response = call_role("general", prompt, ctx)
         except Exception as e:
-            # Timeout or connection error → escalate immediately
             state.transition(Status.ESCALATING, backend="claude")
-            print(f"\n  ↑ escalating to Claude ({role.name}, local error: {e})")
-            ctx = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
-            return call_claude(task, context=ctx), True
+            print(f"\n  ↑ escalating to Claude ({role.name}, error: {e})")
+            return call_role("coder", task, ctx), True
 
-        # Check if escalation needed
         if should_escalate(response, i, role.max_iters):
             state.transition(Status.ESCALATING, backend="claude")
             print(f"\n  ↑ escalating to Claude ({role.name}, iter {i})")
-            ctx = "\n".join(
-                f"{m['role'].upper()}: {m['content']}" for m in messages
-            )
-            response = call_claude(task, context=ctx)
-            return response, True
+            return call_role("coder", task, ctx), True
 
-        # Execute any tool calls
         tool_calls = parse_tool_calls(response)
         if tool_calls:
             tool_results = []
             for name, args in tool_calls:
                 out, err = execute(name, args, role.allowed_tools)
-                tool_results.append(
-                    f"[{name}] {'ERROR: ' + err if err else out[:2000]}"
-                )
-            messages.append({"role": "assistant", "content": response})
-            messages.append({"role": "user",      "content": "\n".join(tool_results)})
+                tool_results.append(f"[{name}] {'ERROR: ' + err if err else out[:2000]}")
+            transcript.append(f"ASSISTANT: {response}")
+            transcript.append(f"TOOL RESULTS: {chr(10).join(tool_results)}")
             continue
 
-        # No tool calls — role is done
-        messages.append({"role": "assistant", "content": response})
+        transcript.append(f"ASSISTANT: {response}")
         return response, False
 
-    # Exhausted iterations
     state.transition(Status.ESCALATING, backend="claude")
     print(f"\n  ↑ escalating to Claude (exhausted {role.name} iterations)")
-    ctx = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
-    return call_claude(task, context=ctx), True
+    ctx = _build_context(role, task, transcript, context)
+    return call_role("coder", task, ctx), True
 
 
 def run(task: str, skip_review: bool = False, skip_test: bool = False,
@@ -115,29 +104,26 @@ def run(task: str, skip_review: bool = False, skip_test: bool = False,
     print(f"\n◆ CASCADE — {task[:80]}\n")
 
     if force_escalate:
-        print("● Claude (forced escalation)")
-        code = call_claude(task)
+        print("● Claude (forced)")
+        code = call_role("coder", task)
         results["programmer"] = code
         results["escalated"]  = True
         state.transition(Status.COMPLETE)
         return results
 
-    # ── Programmer ──
-    print("● Programmer (local)")
+    print("● Programmer")
     code, esc = run_role(PROGRAMMER, task, state, context)
     results["programmer"] = code
     escalated = escalated or esc
-    context = code
-    print(f"  {'↑ claude' if esc else '✓ local'}")
+    context   = code
+    print(f"  {'↑ claude' if esc else '✓ done'}")
 
     if not skip_review:
-        # ── Reviewer ──
-        print("● Reviewer (local)")
-        review_task = f"Review this implementation:\n\n{code}"
-        review, esc = run_role(REVIEWER, review_task, state, context)
+        print("● Reviewer")
+        review, esc = run_role(REVIEWER, f"Review this implementation:\n\n{code}", state, context)
         results["reviewer"] = review
         escalated = escalated or esc
-        print(f"  {'↑ claude' if esc else '✓ local'}")
+        print(f"  {'↑ claude' if esc else '✓ done'}")
 
         if "CHANGES:" in review:
             print("● Programmer (revision)")
@@ -145,20 +131,19 @@ def run(task: str, skip_review: bool = False, skip_test: bool = False,
             code, esc = run_role(PROGRAMMER, revision_task, state, context)
             results["revision"] = code
             escalated = escalated or esc
-            context = code
+            context   = code
 
     if not skip_test:
-        # ── Tester ──
-        print("● Tester (local)")
+        print("● Tester")
         test_task = (
             f"Original task: {task}\n\n"
-            f"Implementation to test:\n\n{context}\n\n"
+            f"Implementation:\n\n{context}\n\n"
             f"Run it, verify it works, report PASS or FAIL."
         )
         test_result, esc = run_role(TESTER, test_task, state, context)
-        results["tester"] = test_result
+        results["tester"]  = test_result
         escalated = escalated or esc
-        print(f"  {'↑ claude' if esc else '✓ local'}")
+        print(f"  {'↑ claude' if esc else '✓ done'}")
 
     state.transition(Status.COMPLETE)
     results["escalated"] = escalated
