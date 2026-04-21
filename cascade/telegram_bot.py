@@ -10,8 +10,22 @@ Setup:
   4. Run: cascade bot
 """
 
-import os, asyncio, textwrap
+import os, asyncio, textwrap, logging
 from datetime import datetime
+from pathlib import Path
+
+logging.basicConfig(
+    format="%(asctime)s %(levelname)s %(message)s",
+    level=logging.INFO
+)
+
+# Load from ~/.cascade.env if env vars not already set
+_env_file = Path.home() / ".cascade.env"
+if _env_file.exists():
+    for line in _env_file.read_text().splitlines():
+        if "=" in line and not line.startswith("#"):
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip())
 
 from telegram import Update
 from telegram.ext import (
@@ -20,7 +34,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-from .repl import ask, mem_save, route
+from .repl import ask_local, ask_claude, mem_save, route
 
 TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "")
 ALLOWED_CHAT_ID = int(os.environ.get("TELEGRAM_CHAT_ID", "0"))
@@ -82,8 +96,22 @@ async def history_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    logging.info(f"Message from chat_id={chat_id}: {update.message.text[:50]}")
+
+    # If no chat ID configured yet, print it and save it
+    if not ALLOWED_CHAT_ID:
+        print(f"\n  ✓ First message received! Your chat ID: {chat_id}")
+        print(f"  Add to ~/.cascade.env: TELEGRAM_CHAT_ID={chat_id}\n")
+        await update.message.reply_text(
+            f"✓ Connected! Your chat ID is: `{chat_id}`\n"
+            f"Add this to your config and restart the bot.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
     # Auth check
-    if ALLOWED_CHAT_ID and update.effective_chat.id != ALLOWED_CHAT_ID:
+    if ALLOWED_CHAT_ID and chat_id != ALLOWED_CHAT_ID:
         await update.message.reply_text("Unauthorised.")
         return
 
@@ -108,12 +136,18 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
-        if force_claude:
-            from .llm import call_claude
-            response = call_claude(query)
+        session_msgs = ctx.chat_data.get("session", [])
+        if force_claude or mode == "claude":
+            response = ask_claude(query, session_msgs)
             backend  = "claude"
         else:
-            response, backend = ask(query)
+            response = ask_local(query, session_msgs)
+            backend  = "local"
+        session_msgs.extend([
+            {"role": "user",      "content": query},
+            {"role": "assistant", "content": response},
+        ])
+        ctx.chat_data["session"] = session_msgs[-12:]
 
         mem_save(query, response, backend)
 

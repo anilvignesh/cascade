@@ -20,8 +20,7 @@ C_RESET  = "\033[0m"
 C_BOLD   = "\033[1m"
 
 SYSTEM = (
-    "You are Cascade, Anil Vignesh's AI assistant. "
-    "Senior PM in cross-border payments, job hunting in Dubai. "
+    "You are Cascade, a local-first AI assistant. "
     "Be direct and concise. Always respond in English only."
 )
 
@@ -94,8 +93,8 @@ def ask_claude(query: str, session_msgs: list[dict]) -> str:
         )
         ctx_parts.append(f"Recent conversation:\n{turns}")
     ctx_parts.append(
-        f"You are Cascade, Anil's AI assistant. Senior PM, cross-border payments.\n"
-        f"Be direct. Today: {datetime.today():%A %d %B %Y}."
+        f"You are Cascade, a local-first AI assistant.\n"
+        f"Be direct and concise. Today: {datetime.today():%A %d %B %Y}."
     )
     return call_claude(query, context="\n\n".join(ctx_parts))
 
