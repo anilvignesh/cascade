@@ -171,6 +171,45 @@ async def skills_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 
+CONFIRM_PHRASE = "jarvis do it"
+
+SYSTEM_KEYWORDS = [
+    "install ", "uninstall ", "upgrade ", "update ", "apt ", "pip install",
+    "ollama pull", "ollama rm", "sudo ", "reboot", "shutdown", "restart ",
+    "rm -", "delete ", "kill ", "pkill", "systemctl"
+]
+
+def _is_system_task(query: str) -> bool:
+    q = query.lower()
+    return any(k in q for k in SYSTEM_KEYWORDS)
+
+
+async def _plan_system_task(query: str) -> str:
+    """Ask Claude to determine the exact command to run."""
+    from .llm import call_claude
+    response = call_claude(
+        f"The user wants to: {query}\n\n"
+        f"Respond with ONLY the exact bash command to run. "
+        f"Nothing else — no explanation, no markdown, just the command."
+    )
+    return response.strip().strip("`").strip()
+
+
+async def _execute_command(command: str) -> str:
+    import subprocess
+    try:
+        result = subprocess.run(
+            command, shell=True, capture_output=True,
+            text=True, timeout=120
+        )
+        out = (result.stdout + result.stderr).strip()
+        return out[:3000] if out else "Done (no output)"
+    except subprocess.TimeoutExpired:
+        return "Command timed out after 120s"
+    except Exception as e:
+        return f"Execution error: {e}"
+
+
 # ── Message handlers ──────────────────────────────────────────────────────────
 
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -191,7 +230,22 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not query:
         return
 
-    # Skill invocation
+    # ── Confirmation for pending system command ──
+    pending = ctx.chat_data.get("pending_command")
+    if pending:
+        if query.lower() == CONFIRM_PHRASE:
+            ctx.chat_data.pop("pending_command", None)
+            await _typing(update, ctx)
+            await update.message.reply_text(f"_Running…_\n`{pending}`", parse_mode=ParseMode.MARKDOWN)
+            output = await _execute_command(pending)
+            await _reply(update, f"```\n{output}\n```")
+            mem_save(f"system: {pending}", output, "bash")
+        else:
+            ctx.chat_data.pop("pending_command", None)
+            await update.message.reply_text("_Cancelled._", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # ── Skill invocation ──
     from .skills import detect_skill, run_skill
     skill_name = detect_skill(query)
     if skill_name:
@@ -201,8 +255,20 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await _reply(update, response)
         return
 
+    # ── System task detection ──
     force_claude = query.startswith("!!")
     clean_query  = query[2:].strip() if force_claude else query
+
+    if _is_system_task(clean_query):
+        await _typing(update, ctx)
+        command = await _plan_system_task(clean_query)
+        ctx.chat_data["pending_command"] = command
+        await update.message.reply_text(
+            f"This will run on your laptop:\n`{command}`\n\nReply *{CONFIRM_PHRASE}* to confirm, or anything else to cancel.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
     await _respond(update, ctx, clean_query, force_claude=force_claude)
 
 
@@ -315,12 +381,7 @@ def run():
         return
 
     print("◆ Cascade Telegram bot starting…")
-    app = (
-        ApplicationBuilder()
-        .token(TELEGRAM_TOKEN)
-        .arbitrary_callback_data(True)
-        .build()
-    )
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start",   start))
     app.add_handler(CommandHandler("status",  status_cmd))
