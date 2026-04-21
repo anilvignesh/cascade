@@ -10,6 +10,7 @@ Entry point: call_role(role, prompt, context)
 """
 
 import json, subprocess, urllib.request, yaml
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
@@ -18,6 +19,23 @@ ENGLISH_RULE = "IMPORTANT: Always respond in English only."
 
 _config:    dict = {}
 _registry:  dict = {}
+
+
+@dataclass
+class TokenStats:
+    input:    int = 0
+    output:   int = 0
+    total:    int = 0
+    cost_usd: float = 0.0
+    model:    str = ""
+
+    def __add__(self, other: "TokenStats") -> "TokenStats":
+        return TokenStats(
+            input    = self.input    + other.input,
+            output   = self.output   + other.output,
+            total    = self.total    + other.total,
+            cost_usd = self.cost_usd + other.cost_usd,
+        )
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -37,19 +55,67 @@ class CLIProvider:
         self.prompt_flag = cfg.get("prompt_flag")
         self.args        = cfg.get("args", [])
 
-    def call(self, prompt: str, context: str = "", timeout: int = 120) -> str:
-        full = f"{context}\n\n{prompt}".strip() if context else prompt
-        cmd  = [self.bin]
+    def _build_cmd(self, full: str, extra_args: list[str] = []) -> list[str]:
+        cmd = [self.bin]
         if self.prompt_flag:
             cmd += [self.prompt_flag, full]
         else:
             cmd.append(full)
-        cmd += self.args
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        output = proc.stdout.strip() or proc.stderr.strip()
-        lines  = [l for l in output.splitlines()
-                  if not l.lower().startswith(("yolo mode", "✻ welcome"))]
+        return cmd + self.args + extra_args
+
+    def _clean(self, output: str) -> str:
+        lines = [l for l in output.splitlines()
+                 if not l.lower().startswith(("yolo mode", "✻ welcome"))]
         return "\n".join(lines).strip()
+
+    def call(self, prompt: str, context: str = "", timeout: int = 120) -> str:
+        full = f"{context}\n\n{prompt}".strip() if context else prompt
+        proc = subprocess.run(
+            self._build_cmd(full), capture_output=True, text=True, timeout=timeout
+        )
+        return self._clean(proc.stdout.strip() or proc.stderr.strip())
+
+    def call_with_stats(self, prompt: str, context: str = "",
+                        timeout: int = 120) -> tuple[str, TokenStats]:
+        full = f"{context}\n\n{prompt}".strip() if context else prompt
+        proc = subprocess.run(
+            self._build_cmd(full, ["--output-format", "json"]),
+            capture_output=True, text=True, timeout=timeout
+        )
+        raw = proc.stdout.strip() or proc.stderr.strip()
+        try:
+            data  = json.loads(raw)
+            text  = data.get("response") or data.get("result", "")
+            stats = self._parse_stats(data)
+            return self._clean(text), stats
+        except Exception:
+            return self._clean(raw), TokenStats()
+
+    def _parse_stats(self, data: dict) -> TokenStats:
+        # Gemini CLI JSON: stats.models.<name>.tokens
+        gemini_stats = data.get("stats", {}).get("models", {})
+        if gemini_stats:
+            inp = out = total = 0
+            model = ""
+            for name, mdata in gemini_stats.items():
+                t = mdata.get("tokens", {})
+                inp   += t.get("input", 0)
+                out   += t.get("candidates", 0)
+                total += t.get("total", 0)
+                model  = name
+            return TokenStats(input=inp, output=out, total=total, model=model)
+
+        # Claude CLI JSON: usage.input_tokens / output_tokens
+        usage = data.get("usage", {})
+        if usage:
+            inp  = usage.get("input_tokens", 0)
+            out  = usage.get("output_tokens", 0)
+            cost = data.get("total_cost_usd", 0.0)
+            model = next(iter(data.get("modelUsage", {})), "claude")
+            return TokenStats(input=inp, output=out, total=inp+out,
+                              cost_usd=cost, model=model)
+
+        return TokenStats()
 
 
 class OllamaProvider:
@@ -126,6 +192,20 @@ def _get_registry() -> dict:
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+
+def call_role_with_stats(role: str, prompt: str,
+                         context: str = "") -> tuple[str, TokenStats]:
+    cfg         = _load_config()
+    provider_id = cfg.get("roles", {}).get(role)
+    if not provider_id:
+        raise ValueError(f"No provider assigned to role '{role}'")
+    provider = _get_registry().get(provider_id)
+    if not provider:
+        raise ValueError(f"Provider '{provider_id}' not found — check config.yml")
+    if hasattr(provider, "call_with_stats"):
+        return provider.call_with_stats(prompt, context)
+    return provider.call(prompt, context), TokenStats()
+
 
 def call_role(role: str, prompt: str, context: str = "") -> str:
     cfg         = _load_config()

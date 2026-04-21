@@ -1,29 +1,28 @@
 """
-Cascade interactive REPL.
-Gemini interprets and routes every query.
-Shared context injected into every model call.
+Cascade interactive REPL — Rich UI with live token counter.
 """
 
 import re
 from datetime import datetime
 from pathlib import Path
 
-from .llm     import call_role, get_role_provider
+from rich.console import Console
+from rich.live    import Live
+from rich.panel   import Panel
+from rich.spinner import Spinner
+from rich.text    import Text
+from rich.markdown import Markdown
+
+from .llm     import call_role_with_stats, get_role_provider, TokenStats
 from .memory  import load_context, recall, save, mempalace_save
 from .profile import load as load_profile
 
-C_GREEN  = "\033[92m"
-C_BLUE   = "\033[94m"
-C_GOLD   = "\033[93m"
-C_PURPLE = "\033[95m"
-C_DIM    = "\033[2m"
-C_RESET  = "\033[0m"
-C_BOLD   = "\033[1m"
+console = Console()
 
-_PROVIDER_COLORS = {
-    "gemini": C_PURPLE,
-    "claude": C_BLUE,
-    "local":  C_GOLD,
+_PROVIDER_STYLE = {
+    "gemini": "bold magenta",
+    "claude": "bold blue",
+    "local":  "bold yellow",
 }
 
 ROUTING_PROMPT = """\
@@ -45,12 +44,26 @@ Examples:
 User message: {query}"""
 
 
+def _fmt_tokens(stats: TokenStats) -> str:
+    if not stats.total:
+        return ""
+    parts = [f"↑{stats.input:,} ↓{stats.output:,}"]
+    if stats.cost_usd:
+        parts.append(f"${stats.cost_usd:.4f}")
+    return "  ".join(parts)
+
+
+def _fmt_session(total: TokenStats) -> str:
+    if not total.total:
+        return ""
+    s = f"session {total.total:,} tokens"
+    if total.cost_usd:
+        s += f"  ${total.cost_usd:.4f}"
+    return s
+
 
 def route_query(raw: str) -> tuple[str, str, str]:
-    """Returns (type, value, clean_query). type = 'model' | 'skill'."""
     q = raw.strip()
-
-    # Hard overrides — no LLM needed
     if q.startswith("!!"):
         return ("model", "claude", q[2:].strip())
     if q.startswith("!g"):
@@ -60,9 +73,10 @@ def route_query(raw: str) -> tuple[str, str, str]:
         args = " ".join(q.split()[1:])
         return ("skill", name, args)
 
-    # Gemini interprets intent
     try:
-        raw_response = call_role("interpreter", ROUTING_PROMPT.format(query=q))
+        raw_response, _ = call_role_with_stats(
+            "interpreter", ROUTING_PROMPT.format(query=q)
+        )
         m = re.search(r'\{[^}]+\}', raw_response, re.DOTALL)
         if m:
             data = json_parse(m.group())
@@ -76,7 +90,6 @@ def route_query(raw: str) -> tuple[str, str, str]:
     except Exception:
         pass
 
-    # Keyword fallback
     lower = q.lower()
     if any(w in lower for w in ("code", "script", "implement", "build", "refactor", "debug", "fix")):
         return ("model", "claude", q)
@@ -89,10 +102,10 @@ def json_parse(s: str) -> dict:
 
 
 def _build_context(session_msgs: list[dict], memory: dict) -> str:
-    rom     = load_context()       # context.md  — always present
-    hdd     = memory.get("hdd")    # memory.md   — past Q&A keyword match
-    ram     = memory.get("ram")    # MemPalace   — semantic recall
-    profile = load_profile()       # MemPalace profile (silent if down)
+    rom     = load_context()
+    hdd     = memory.get("hdd")
+    ram     = memory.get("ram")
+    profile = load_profile()
 
     parts = [
         f"You are Cascade, an AI assistant.\n"
@@ -112,35 +125,44 @@ def _build_context(session_msgs: list[dict], memory: dict) -> str:
 
 
 def run():
-    print(f"\n{C_BOLD}{C_GREEN}◆ CASCADE{C_RESET}  "
-          f"{C_DIM}Gemini · Claude  ·  !! claude  ·  !g gemini  ·  /skill  ·  exit{C_RESET}\n")
+    console.print()
+    console.print(Panel(
+        "[bold green]◆ CASCADE[/]   [dim]Gemini · Claude  ·  "
+        "[bold]!![/] claude  ·  [bold]!g[/] gemini  ·  "
+        "[bold]/skill[/]  ·  exit[/]",
+        border_style="green",
+        padding=(0, 2),
+    ))
+    console.print()
 
-    history:      list = []
-    session_msgs: list = []
+    history:      list       = []
+    session_msgs: list       = []
+    session_total             = TokenStats()
 
     while True:
         try:
-            raw = input(f"{C_GREEN}›{C_RESET} ").strip()
+            raw = console.input("[bold green]›[/] ").strip()
         except (EOFError, KeyboardInterrupt):
-            print(f"\n{C_DIM}bye{C_RESET}")
+            _print_session_summary(session_total)
             break
 
         if not raw:
             continue
         if raw.lower() in ("exit", "quit", "q"):
-            print(f"{C_DIM}bye{C_RESET}")
+            _print_session_summary(session_total)
             break
         if raw.lower() == "history":
             if not history:
-                print(f"  {C_DIM}no history yet{C_RESET}")
+                console.print("  [dim]no history yet[/]")
             for i, (q, _, b) in enumerate(history[-10:], 1):
-                print(f"  {C_DIM}{i}. [{b}] {q[:65]}{C_RESET}")
-            print()
+                console.print(f"  [dim]{i}. [{b}] {q[:65]}[/]")
+            console.print()
             continue
         if raw.lower() == "clear":
             history.clear()
             session_msgs.clear()
-            print(f"{C_DIM}cleared{C_RESET}\n")
+            session_total = TokenStats()
+            console.print("[dim]cleared[/]\n")
             continue
 
         try:
@@ -154,24 +176,49 @@ def run():
             if route_type == "skill":
                 memory  = recall(clean_query or raw)
                 context = _build_context(session_msgs, memory)
-                print(f"  {C_DIM}[/{route_value}]{C_RESET}\n", flush=True)
+                console.print(f"  [dim]/{route_value}[/]\n")
                 response = run_skill(route_value, clean_query, context)
-                print(response, "\n")
+                console.print(Panel(
+                    Markdown(response),
+                    title=f"[dim]/{route_value}[/]",
+                    border_style="dim",
+                ))
                 save(raw, response, f"skill:{route_value}")
                 mempalace_save(raw, response, f"skill:{route_value}")
                 history.append((raw, response, f"skill:{route_value}"))
+                console.print()
                 continue
 
             memory  = recall(raw)
             context = _build_context(session_msgs, memory)
+            role    = "coder" if route_value == "claude" else "researcher"
+            provider = get_role_provider(role)
+            style    = _PROVIDER_STYLE.get(provider, "dim")
+            label    = route_value.capitalize()
 
-            role  = "coder" if route_value == "claude" else "researcher"
-            color = _PROVIDER_COLORS.get(get_role_provider(role), C_DIM)
-            label = f"{color}{route_value.capitalize()}{C_RESET}"
-            print(f"  {C_DIM}[{label}{C_DIM}]{C_RESET}\n", flush=True)
+            # Spinner while waiting
+            response, stats = None, TokenStats()
+            with Live(
+                Spinner("dots", text=f" [dim]{label} thinking...[/]"),
+                console=console, refresh_per_second=12, transient=True
+            ):
+                response, stats = call_role_with_stats(role, clean_query, context)
 
-            response = call_role(role, clean_query, context)
-            print(response, "\n")
+            session_total = session_total + stats
+            tok_str      = _fmt_tokens(stats)
+            ses_str      = _fmt_session(session_total)
+
+            console.print(Panel(
+                Markdown(response),
+                title=f"[{style}]{label}[/]",
+                subtitle=f"[dim]{tok_str}[/]" if tok_str else None,
+                border_style="dim",
+                padding=(1, 2),
+            ))
+
+            if ses_str:
+                console.print(f"  [dim]{ses_str}[/]")
+            console.print()
 
             session_msgs.append({"role": "user",      "content": clean_query})
             session_msgs.append({"role": "assistant",  "content": response})
@@ -181,6 +228,18 @@ def run():
             history.append((raw, response, route_value))
 
         except KeyboardInterrupt:
-            print(f"\n{C_DIM}interrupted{C_RESET}\n")
+            console.print("\n[dim]interrupted[/]\n")
         except Exception as e:
-            print(f"\033[91mError: {e}\033[0m\n")
+            console.print(f"[red]Error: {e}[/]\n")
+
+
+def _print_session_summary(total: TokenStats):
+    console.print()
+    if total.total:
+        parts = [f"[dim]session total: {total.total:,} tokens"]
+        if total.cost_usd:
+            parts.append(f"${total.cost_usd:.4f}[/]")
+        else:
+            parts.append("[/]")
+        console.print("  " + "  ".join(parts))
+    console.print("[dim]bye[/]\n")
