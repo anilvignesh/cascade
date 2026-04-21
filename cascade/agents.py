@@ -16,9 +16,36 @@ from pathlib import Path
 
 from .llm   import call_role
 from .tools import execute, REGISTRY
-from .agent import parse_tool_calls   # reuse existing parser
 
 _CONFIG_PATH = Path(__file__).parent.parent / "config.yml"
+
+_PATTERNS = [
+    re.compile(r'<tool>\s*(\w+)\s*</tool>\s*<args>(.*?)</args>', re.DOTALL),
+    re.compile(r'<function\s+name=["\'](\w+)["\'][^>]*>(.*?)</function>', re.DOTALL),
+    re.compile(r'\{\s*"tool"\s*:\s*"(\w+)"\s*,\s*"args"\s*:\s*(\{.*?\})\s*\}', re.DOTALL),
+]
+_BASH_BLOCK = re.compile(r'```(?:bash|sh|shell)\n(.*?)```', re.DOTALL)
+
+
+def parse_tool_calls(text: str) -> list[tuple[str, dict]]:
+    for pattern in _PATTERNS:
+        calls = []
+        for m in pattern.finditer(text):
+            name = m.group(1).strip()
+            if name not in REGISTRY:
+                continue
+            try:
+                args = json.loads(m.group(2).strip())
+            except json.JSONDecodeError:
+                args = {"command": m.group(2).strip()}
+            calls.append((name, args))
+        if calls:
+            return calls
+    return [
+        ("bash", {"command": m.group(1).strip()})
+        for m in _BASH_BLOCK.finditer(text)
+        if m.group(1).strip()
+    ]
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
