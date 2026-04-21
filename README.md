@@ -1,12 +1,16 @@
 # Cascade
 
-A multi-model AI orchestration framework. Route tasks to the right model, share context and memory across all of them, and let them work in parallel — without API keys.
+A multi-model AI orchestration framework for your terminal. Route tasks to the right model, share memory across all of them, and let agents work in parallel — without API keys.
 
-Cascade runs on CLI subscriptions (Gemini, Claude) and local models (Ollama). Add a model by editing one config file.
+Cascade runs on CLI subscriptions (Gemini CLI, Claude Code) and local models (Ollama). Adding a new model is one edit to `config.yml`.
 
 ---
 
-## How it works
+## The idea
+
+Most AI frameworks require API keys and charge per token. Cascade uses the CLI tools you already pay for — Gemini CLI (Google One) and Claude Code (Anthropic subscription) — and wraps them in a single interface with shared memory.
+
+When you give it a task, a reasoning model (Gemini) plans how to break it down, assigns the right agent to each part, runs independent parts in parallel, and synthesises a final response. Add a new model, assign it to a role, and the orchestrator uses it automatically.
 
 ```
 cascade "research X and build Y"
@@ -15,22 +19,28 @@ cascade "research X and build Y"
     plans the task, assigns agents
               ↓
     ┌─────────────────┬──────────────────┐
-    │  researcher     │  analyst         │  ← parallel subprocesses
+    │  researcher     │  analyst         │  ← run in parallel
     │  (Gemini CLI)   │  (Gemini CLI)    │
     └─────────────────┴──────────────────┘
               ↓
     coder (Claude CLI) ← if implementation needed
               ↓
-    Gemini synthesises → single final response
+    Gemini synthesises → final response
 ```
+
+---
+
+## Memory
 
 Every model call gets the same injected context:
 
 | Layer | File | Role |
 |---|---|---|
 | ROM | `~/.cascade/context.md` | Persistent facts — you write this once |
-| HDD | `~/.cascade/memory.md` | Past Q&A, keyword-searched automatically |
+| HDD | `~/.cascade/memory.md` | Past Q&A, keyword-searched on each call |
 | RAM | MemPalace (optional) | Semantic graph memory, if installed |
+
+Run `cascade learn` to synthesise patterns from your history into `context.md` automatically.
 
 ---
 
@@ -54,15 +64,14 @@ Python 3.10+
 git clone https://github.com/anilvignesh/cascade.git
 cd cascade
 pip install -e .
+cascade init        # auto-detects installed CLIs, writes config.yml
 ```
 
-Create your persistent context file:
+Or manually create your context file:
 
 ```bash
 mkdir -p ~/.cascade
-nano ~/.cascade/context.md
-# Write anything you want injected into every model call.
-# Example: "I'm a backend engineer. Always use Python. Be concise."
+echo "I'm a backend engineer. Always use Python. Be concise." > ~/.cascade/context.md
 ```
 
 ---
@@ -71,17 +80,18 @@ nano ~/.cascade/context.md
 
 ```bash
 cascade                            # interactive REPL
-cascade "do something"             # orchestrator — plans + runs agents + synthesises
+cascade "do something"             # orchestrator — plans, runs agents, synthesises
 cascade agent <name> "task"        # run a specific agent directly
 cascade agents                     # list available agents
-cascade learn                      # synthesise memory → update context.md
 cascade skills                     # list installed skills
+cascade learn                      # synthesise memory → update context.md
+cascade status                     # provider health + last agent run
 ```
 
 **REPL shortcuts:**
 - `!! task` — force Claude
 - `!g task` — force Gemini
-- `/skillname args` — run a skill
+- `/skillname args` — run a skill (e.g. `/search SWIFT gpi`)
 - `history` — show recent queries
 - `clear` — reset session context
 
@@ -105,7 +115,7 @@ providers:
     prompt_flag: "-p"
     args: ["--allowedTools", "Bash,Read,Write,Edit,Glob,Grep", "--dangerously-skip-permissions"]
 
-  # Uncomment to enable local model (requires Ollama)
+  # Uncomment to add a local model via Ollama
   # local:
   #   type: ollama
   #   model: llama3:8b
@@ -116,51 +126,15 @@ roles:
   coder:       claude   # code, architecture, debugging
   researcher:  gemini   # research, analysis, drafting
   general:     gemini   # fallback
-
-permissions:
-  gemini:
-    can_read_files:    false
-    can_write_files:   false
-    can_run_commands:  false
-    can_access_memory: true
-  claude:
-    can_read_files:    true
-    can_write_files:   true
-    can_run_commands:  true
-    can_access_memory: true
 ```
 
----
-
-## Adding a model
-
-Any model with a CLI or API can be added:
-
-```yaml
-# Local via Ollama
-providers:
-  local:
-    type: ollama
-    model: llama3:70b
-    url: http://localhost:11434/api/chat
-
-# API-based (optional)
-  openai:
-    type: api
-    provider: openai
-    model: gpt-4o
-    api_key_env: OPENAI_API_KEY
-
-# Assign to a role
-roles:
-  general: local
-```
+Assign any role to any model. The orchestrator reads this at runtime.
 
 ---
 
 ## Agents
 
-Agents are autonomous workers with a think → act → observe loop. Define them in `config.yml`:
+Agents are named workers: a model role + a purpose + a set of tools. Define them in `config.yml`:
 
 ```yaml
 agents:
@@ -177,41 +151,38 @@ agents:
     system_prompt: "You are a coding agent. Implement tasks fully. Output DONE when complete."
 ```
 
-The orchestrator (`cascade "task"`) automatically plans which agents to use, runs independent steps in parallel, and synthesises the result.
-
-Run an agent directly:
+The orchestrator (`cascade "task"`) plans which agents to use, runs independent steps in parallel, and synthesises the result. Run an agent directly:
 
 ```bash
 cascade agent researcher "how does SWIFT gpi work"
-cascade agent coder "write a python script to parse CSV files"
-```
-
----
-
-## Learning
-
-Cascade synthesises patterns from your interaction history and writes them into `context.md` as a `[LEARNED]` block. Your manually written content is never touched.
-
-```bash
-cascade learn
-```
-
-Schedule it nightly:
-
-```bash
-# crontab -e
-0 2 * * * /path/to/cascade learn >> ~/.cascade/learn.log 2>&1
+cascade agent coder "write a Python script to parse CSV files"
 ```
 
 ---
 
 ## Skills
 
-Skills are pluggable modules in `cascade/skills/<name>/skill.py`. Each exposes a `DESCRIPTION` string and a `run(query, context)` function.
+Skills are pluggable modules in `skills/<name>/skill.py`. Each exposes a `DESCRIPTION` string and a `run(query, context)` function. Call them from the REPL with `/skillname`.
+
+Built-in skills:
+
+| Skill | What it does |
+|---|---|
+| `/search` | Web search — Tavily API or DuckDuckGo fallback |
+| `/ingest` | Convert any file or URL to markdown (PDF, Word, Excel, HTML, images) |
+
+---
+
+## Learning
+
+Cascade synthesises patterns from your interaction history and writes them into `context.md` as a `[LEARNED]` block. Your manually written content is never modified.
 
 ```bash
-cascade skills        # list installed skills
-/skillname args       # invoke from the REPL
+cascade learn
+
+# or schedule it nightly
+# crontab -e
+# 0 2 * * * /path/to/cascade learn >> ~/.cascade/learn.log 2>&1
 ```
 
 ---
@@ -221,19 +192,19 @@ cascade skills        # list installed skills
 ```
 cascade/
 ├── cascade/
-│   ├── cli.py        # Entry point — all subcommands
-│   ├── llm.py        # Provider registry (CLI / Ollama / API transports)
-│   ├── agents.py     # Agent class + Orchestrator with parallel execution
-│   ├── memory.py     # Three-layer memory (ROM / HDD / RAM)
-│   ├── learn.py      # Memory synthesis → context.md
-│   ├── repl.py       # Interactive REPL
-│   ├── init_cmd.py   # cascade init — auto-detect CLIs, write config
-│   ├── agent.py      # Programmer → Reviewer → Tester pipeline
-│   ├── roles.py      # Role definitions
-│   ├── tools.py      # Tool registry (bash, read, write, edit, glob, grep)
-│   └── skills.py     # Skills loader
-├── skills/           # Pluggable skill modules
-├── config.yml        # All configuration
+│   ├── cli.py          # Entry point — all subcommands
+│   ├── llm.py          # Provider registry (CLI / Ollama / API transports)
+│   ├── agents.py       # Agent + Orchestrator (parallel execution)
+│   ├── memory.py       # Three-layer memory (ROM / HDD / RAM)
+│   ├── learn.py        # Memory synthesis → context.md
+│   ├── repl.py         # Interactive REPL with Rich UI
+│   ├── init_cmd.py     # cascade init — auto-detect CLIs, write config
+│   ├── tools.py        # Tool registry (bash, read, write, edit, glob, grep)
+│   └── skills.py       # Skills loader
+├── skills/             # Pluggable skill modules
+│   ├── search/         # Web search (Tavily + DDG)
+│   └── ingest/         # Document ingestion (markitdown)
+├── config.yml          # All configuration
 └── pyproject.toml
 ```
 
@@ -241,10 +212,15 @@ cascade/
 
 ## Roadmap
 
-- [x] `cascade init` — auto-detect installed CLIs, generate config
+- [x] Config-driven provider registry (CLI / Ollama / API)
+- [x] Role-based model routing
+- [x] Three-layer memory (ROM / HDD / RAM)
+- [x] Agent + Orchestrator with parallel execution
+- [x] `cascade init` — auto-detect installed CLIs
 - [x] Web search skill (Tavily + DuckDuckGo fallback)
-- [x] Document ingestion skill (markitdown — PDF, Word, Excel, images, HTML)
-- [x] `max_parallel` config option for rate limit control
-- [ ] Browser automation plugin (browser-use)
-- [ ] Sandboxed code execution (E2B)
-- [ ] Advanced memory backends (mem0, Graphiti)
+- [x] Document ingestion skill (markitdown)
+- [x] `max_parallel` for rate limit control
+- [x] Nightly learning synthesis (`cascade learn`)
+- [ ] More models — test with local Ollama models
+- [ ] Browser automation skill (Playwright)
+- [ ] Sandboxed code execution
