@@ -34,6 +34,11 @@ def main():
         run()
         return
 
+    if args[0] == "watch":
+        from cascade.watcher import run
+        run()
+        return
+
     if args[0] == "skills":
         from cascade.skills import list_skills
         skills = list_skills()
