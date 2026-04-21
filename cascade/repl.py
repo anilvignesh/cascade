@@ -1,7 +1,7 @@
 """
 Cascade interactive REPL.
-Type queries, get responses from Qwen3 or Claude depending on complexity.
-All exchanges saved to MemPalace — shared context across both models.
+Type queries → Qwen3 or Claude responds.
+Session conversation kept in memory. All exchanges saved to MemPalace.
 """
 
 import sys, subprocess
@@ -10,8 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / ".jarvis"))
 
-from .llm   import call_local, call_claude
-from .state import WorkerState, Status
+from .llm import call_local, call_claude
 
 C_GREEN  = "\033[92m"
 C_BLUE   = "\033[94m"
@@ -19,6 +18,12 @@ C_GOLD   = "\033[93m"
 C_DIM    = "\033[2m"
 C_RESET  = "\033[0m"
 C_BOLD   = "\033[1m"
+
+SYSTEM = (
+    "You are Cascade, Anil Vignesh's AI assistant. "
+    "Senior PM in cross-border payments, job hunting in Dubai. "
+    "Be direct and concise. Always respond in English only."
+)
 
 
 def mem_search(query: str) -> str:
@@ -51,59 +56,56 @@ def mem_save(query: str, response: str, backend: str):
 
 
 def route(query: str) -> str:
-    """Decide local or claude. Reuses jarvis router if available."""
     try:
         from agents.router import route as _route
         return _route(query)
     except Exception:
         pass
-    # Fallback: simple keyword check
     claude_kw = ["draft", "write", "build", "create", "code", "script",
                  "refactor", "fix", "implement", "email", "execute"]
-    q = query.lower()
-    if any(k in q for k in claude_kw):
+    if any(k in query.lower() for k in claude_kw):
         return "claude"
     return "local"
 
 
-def ask(query: str) -> tuple[str, str]:
-    """Returns (response, backend_label)."""
+def ask_local(query: str, session_msgs: list[dict]) -> str:
+    """Call Qwen3 with full session history + MemPalace context."""
     mem = mem_search(query)
-    context = f"Memory context:\n{mem}\n\n" if mem else ""
+    messages = [{"role": "system", "content": SYSTEM}]
+    if mem:
+        messages.append({"role": "user",      "content": f"Relevant memory:\n{mem}"})
+        messages.append({"role": "assistant",  "content": "Noted."})
+    # Include last 6 turns of session for multi-turn context (keep tokens manageable)
+    messages.extend(session_msgs[-6:])
+    messages.append({"role": "user", "content": query})
+    return call_local(messages, max_tokens=1024)
 
-    mode = route(query)
 
-    if mode == "claude":
-        prompt = (
-            f"{context}"
-            f"You are Cascade, Anil's AI assistant. Senior PM, cross-border payments.\n"
-            f"Be direct. Today: {datetime.today():%A %d %B %Y}.\n\n"
-            f"{query}"
+def ask_claude(query: str, session_msgs: list[dict]) -> str:
+    """Call Claude with session history as context."""
+    mem = mem_search(query)
+    ctx_parts = []
+    if mem:
+        ctx_parts.append(f"MemPalace context:\n{mem}")
+    if session_msgs:
+        turns = "\n".join(
+            f"{'Anil' if m['role']=='user' else 'Cascade'}: {m['content'][:300]}"
+            for m in session_msgs[-6:]
         )
-        response = call_claude(prompt)
-        return response, "claude"
-    else:
-        system = (
-            "You are Cascade, Anil Vignesh's AI assistant. "
-            "Senior PM in cross-border payments, job hunting in Dubai. "
-            "Be direct and concise. Always respond in English only."
-        )
-        messages = [
-            {"role": "system", "content": system},
-        ]
-        if mem:
-            messages.append({"role": "user",      "content": f"Memory context:\n{mem}"})
-            messages.append({"role": "assistant",  "content": "Got it, I have that context."})
-        messages.append({"role": "user", "content": query})
-
-        response = call_local(messages, max_tokens=1024)
-        return response, "local"
+        ctx_parts.append(f"Recent conversation:\n{turns}")
+    ctx_parts.append(
+        f"You are Cascade, Anil's AI assistant. Senior PM, cross-border payments.\n"
+        f"Be direct. Today: {datetime.today():%A %d %B %Y}."
+    )
+    return call_claude(query, context="\n\n".join(ctx_parts))
 
 
 def run():
-    print(f"\n{C_BOLD}{C_GREEN}◆ CASCADE{C_RESET}  {C_DIM}local-first AI · type 'exit' to quit{C_RESET}\n")
+    print(f"\n{C_BOLD}{C_GREEN}◆ CASCADE{C_RESET}  "
+          f"{C_DIM}local-first AI · !! for Claude · /skill · exit{C_RESET}\n")
 
-    history = []
+    history      = []   # (query, response, backend)
+    session_msgs = []   # running conversation for multi-turn context
 
     while True:
         try:
@@ -118,49 +120,56 @@ def run():
             print(f"{C_DIM}bye{C_RESET}")
             break
         if raw.lower() == "history":
+            if not history:
+                print(f"  {C_DIM}no history yet{C_RESET}")
             for i, (q, _, b) in enumerate(history[-10:], 1):
-                print(f"  {C_DIM}{i}. [{b}] {q[:60]}{C_RESET}")
+                print(f"  {C_DIM}{i}. [{b}] {q[:65]}{C_RESET}")
+            print()
             continue
         if raw.lower() == "clear":
             history.clear()
-            print(f"{C_DIM}history cleared{C_RESET}")
+            session_msgs.clear()
+            print(f"{C_DIM}cleared{C_RESET}\n")
             continue
 
-        # Force escalation with !! prefix
         force_claude = raw.startswith("!!")
         query = raw[2:].strip() if force_claude else raw
 
         try:
-            # Check for skill invocation (/skillname ...)
+            # Skill invocation
             from .skills import detect_skill, run_skill
             skill_name = detect_skill(query)
             if skill_name:
                 skill_query = " ".join(query.split()[1:])
-                print(f"  {C_DIM}[skill: {skill_name}]{C_RESET}\n", flush=True)
+                print(f"  {C_DIM}[/{skill_name}]{C_RESET}\n", flush=True)
                 response = run_skill(skill_name, skill_query)
-                print(response)
-                print()
+                print(response, "\n")
                 mem_save(query, response, f"skill:{skill_name}")
                 history.append((query, response, f"skill:{skill_name}"))
                 continue
 
-            mode_hint = "claude" if force_claude else route(query)
-            label = f"{C_BLUE}Claude{C_RESET}" if mode_hint == "claude" else f"{C_GOLD}Qwen3{C_RESET}"
-            print(f"  {C_DIM}[{label}{C_DIM}]{C_RESET}", end="\n\n", flush=True)
+            # Route
+            mode = "claude" if force_claude else route(query)
+            label = f"{C_BLUE}Claude{C_RESET}" if mode == "claude" else f"{C_GOLD}Qwen3{C_RESET}"
+            print(f"  {C_DIM}[{label}{C_DIM}]{C_RESET}\n", flush=True)
 
-            if force_claude:
-                response = call_claude(query)
-                backend = "claude"
+            if mode == "claude":
+                response = ask_claude(query, session_msgs)
+                backend  = "claude"
             else:
-                response, backend = ask(query)
+                response = ask_local(query, session_msgs)
+                backend  = "local"
 
-            print(response)
-            print()
+            print(response, "\n")
+
+            # Update session conversation (multi-turn)
+            session_msgs.append({"role": "user",      "content": query})
+            session_msgs.append({"role": "assistant",  "content": response})
 
             mem_save(query, response, backend)
             history.append((query, response, backend))
 
         except KeyboardInterrupt:
-            print(f"\n{C_DIM}interrupted{C_RESET}")
+            print(f"\n{C_DIM}interrupted{C_RESET}\n")
         except Exception as e:
-            print(f"\033[91mError: {e}\033[0m")
+            print(f"\033[91mError: {e}\033[0m\n")
