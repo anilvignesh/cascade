@@ -34,7 +34,8 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-from .repl import ask_local, ask_claude, mem_save, route
+from .repl    import ask_local, ask_claude, mem_save, route
+from .profile import load as load_profile
 
 TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "")
 ALLOWED_CHAT_ID = int(os.environ.get("TELEGRAM_CHAT_ID", "0"))

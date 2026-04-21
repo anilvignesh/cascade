@@ -10,7 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / ".jarvis"))
 
-from .llm import call_local, call_claude
+from .llm     import call_local, call_claude
+from .profile import load as load_profile
 
 C_GREEN  = "\033[92m"
 C_BLUE   = "\033[94m"
@@ -68,34 +69,41 @@ def route(query: str) -> str:
 
 
 def ask_local(query: str, session_msgs: list[dict]) -> str:
-    """Call Qwen3 with full session history + MemPalace context."""
-    mem = mem_search(query)
+    """Call Qwen3 with user profile + session history + relevant memory."""
+    profile = load_profile()
+    mem     = mem_search(query)
+
     messages = [{"role": "system", "content": SYSTEM}]
+    if profile:
+        messages.append({"role": "user",      "content": f"User profile:\n{profile}"})
+        messages.append({"role": "assistant",  "content": "Got it."})
     if mem:
         messages.append({"role": "user",      "content": f"Relevant memory:\n{mem}"})
         messages.append({"role": "assistant",  "content": "Noted."})
-    # Include last 6 turns of session for multi-turn context (keep tokens manageable)
     messages.extend(session_msgs[-6:])
     messages.append({"role": "user", "content": query})
     return call_local(messages, max_tokens=1024)
 
 
 def ask_claude(query: str, session_msgs: list[dict]) -> str:
-    """Call Claude with session history as context."""
-    mem = mem_search(query)
-    ctx_parts = []
+    """Call Claude with user profile + session history + relevant memory."""
+    profile = load_profile()
+    mem     = mem_search(query)
+
+    ctx_parts = [
+        f"You are Cascade, a local-first AI assistant.\n"
+        f"Be direct and concise. Today: {datetime.today():%A %d %B %Y}."
+    ]
+    if profile:
+        ctx_parts.append(f"User profile:\n{profile}")
     if mem:
-        ctx_parts.append(f"MemPalace context:\n{mem}")
+        ctx_parts.append(f"Relevant memory:\n{mem}")
     if session_msgs:
         turns = "\n".join(
-            f"{'Anil' if m['role']=='user' else 'Cascade'}: {m['content'][:300]}"
+            f"{'User' if m['role']=='user' else 'Cascade'}: {m['content'][:300]}"
             for m in session_msgs[-6:]
         )
         ctx_parts.append(f"Recent conversation:\n{turns}")
-    ctx_parts.append(
-        f"You are Cascade, a local-first AI assistant.\n"
-        f"Be direct and concise. Today: {datetime.today():%A %d %B %Y}."
-    )
     return call_claude(query, context="\n\n".join(ctx_parts))
 
 
