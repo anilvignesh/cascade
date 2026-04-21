@@ -62,7 +62,7 @@ def run_role(role: Role, task: str, state: WorkerState, context: str = "") -> tu
         prompt = transcript[-1] if transcript else task
 
         try:
-            response = call_role("general", prompt, ctx)
+            response = call_role(role.name, prompt, ctx)
         except Exception as e:
             state.transition(Status.ESCALATING, backend="claude")
             print(f"\n  ↑ escalating to Claude ({role.name}, error: {e})")

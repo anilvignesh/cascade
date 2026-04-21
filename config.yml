@@ -19,6 +19,9 @@ roles:
   coder:       claude   # implementation, debugging, architecture
   researcher:  gemini   # research, analysis, drafting
   general:     gemini   # fallback for everything else
+  programmer:  claude
+  reviewer:    gemini
+  tester:      gemini
 
 permissions:
   gemini:

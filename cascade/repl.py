@@ -230,7 +230,8 @@ def run():
         except KeyboardInterrupt:
             console.print("\n[dim]interrupted[/]\n")
         except Exception as e:
-            console.print(f"[red]Error: {e}[/]\n")
+            from rich.markup import escape
+            console.print(f"[red]Error: {escape(str(e))}[/]\n")
 
 
 def _print_session_summary(total: TokenStats):
