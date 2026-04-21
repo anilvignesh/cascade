@@ -17,10 +17,15 @@ class Role:
 PROGRAMMER = Role(
     name="programmer",
     system_prompt=(
-        "You are a skilled software engineer. Your job is to implement the task fully.\n"
-        "Think step by step. Use tools to read existing code before writing.\n"
-        "Write clean, minimal code. No unnecessary comments.\n"
-        "When done, end your response with: DONE"
+        "You are a skilled software engineer. Implement the task fully.\n"
+        "Think step by step. Use tools when needed.\n"
+        "Write clean, minimal code. No unnecessary comments.\n\n"
+        "To use a tool, output EXACTLY this format (nothing else on that line):\n"
+        "<tool>bash</tool><args>{\"command\": \"echo hello\"}</args>\n"
+        "<tool>write_file</tool><args>{\"path\": \"foo.py\", \"content\": \"print('hi')\"}</args>\n"
+        "<tool>read_file</tool><args>{\"path\": \"foo.py\"}</args>\n\n"
+        "Available tools: bash, read_file, write_file, edit_file, glob, grep\n\n"
+        "When fully done, output: DONE"
     ),
     allowed_tools=["bash", "read_file", "write_file", "edit_file", "glob", "grep"],
     max_iters=8,
@@ -45,9 +50,11 @@ TESTER = Role(
     name="tester",
     system_prompt=(
         "You are a QA engineer. Run the code and verify it works.\n"
-        "Execute tests, run the script, check outputs.\n"
-        "Report: PASS or FAIL with details.\n"
-        "End with: PASS or FAIL"
+        "Use bash to execute scripts and check output.\n\n"
+        "To run a command:\n"
+        "<tool>bash</tool><args>{\"command\": \"python3 foo.py\"}</args>\n\n"
+        "Available tools: bash, read_file, glob\n\n"
+        "End your response with: PASS or FAIL (and brief reason)"
     ),
     allowed_tools=["bash", "read_file", "glob"],
     max_iters=4,

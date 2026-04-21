@@ -115,13 +115,26 @@ python run.py "write a fibonacci function" --no-review --json
 
 ---
 
+## Performance
+
+Response time depends entirely on your hardware:
+
+| Hardware | Model | Avg response | Notes |
+|----------|-------|-------------|-------|
+| 16GB RAM (current) | Qwen3:8b | ~90s/call | Slower; escalation kicks in more often |
+| 64GB RAM | Qwen3:32b | ~30s/call | Recommended sweet spot |
+| 64GB RAM | Qwen3:72b Q4 | ~60s/call | Maximum local quality |
+
+On 16GB RAM, complex tasks will frequently escalate to Claude — that's expected and by design. After a 64GB RAM upgrade, Qwen3:32b handles most tasks locally.
+
 ## Upgrading the Local Model
 
 Cascade is model-agnostic. Change one line in `config.yml`:
 
 ```yaml
-local_model: qwen3:8b      # current
-# local_model: qwen3:32b   # after 64GB RAM upgrade — much stronger reasoning
+local_model: qwen3:8b      # current (16GB RAM)
+# local_model: qwen3:32b   # after 64GB RAM upgrade — recommended
+# local_model: qwen3:72b   # maximum quality, needs 64GB+
 ```
 
 The escalation threshold naturally lowers as the local model gets smarter — fewer tasks reach Claude.

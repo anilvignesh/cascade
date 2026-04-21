@@ -14,7 +14,7 @@ CLAUDE_BIN  = str(Path.home() / ".local" / "bin" / "claude")
 ENGLISH_RULE = "IMPORTANT: Always respond in English only."
 
 
-def call_local(messages: list[dict], max_tokens: int = 1024) -> str:
+def call_local(messages: list[dict], max_tokens: int = 2048, timeout: int = 300) -> str:
     system = next((m["content"] for m in messages if m["role"] == "system"), "")
     chat_messages = [
         {"role": "system", "content": f"{system}\n\n{ENGLISH_RULE}".strip()},
@@ -30,7 +30,7 @@ def call_local(messages: list[dict], max_tokens: int = 1024) -> str:
         OLLAMA_URL, data=payload,
         headers={"Content-Type": "application/json"}
     )
-    with urllib.request.urlopen(req, timeout=120) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())["message"]["content"].strip()
 
 

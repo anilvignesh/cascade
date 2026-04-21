@@ -8,7 +8,7 @@ import json, re
 from .state  import WorkerState, Status
 from .roles  import PROGRAMMER, REVIEWER, TESTER, Role
 from .tools  import execute
-from .llm    import call_local, call_claude, should_escalate
+from .llm    import call_local, call_claude, should_escalate  # noqa: F401
 
 
 TOOL_PATTERN = re.compile(
@@ -40,9 +40,13 @@ def run_role(role: Role, task: str, state: WorkerState, context: str = "") -> tu
         state.transition(Status.PROCESSING, backend="local", iteration=i)
 
         try:
-            response = call_local(messages, max_tokens=1500)
+            response = call_local(messages, max_tokens=2048)
         except Exception as e:
-            response = f"local_error: {e}"
+            # Timeout or connection error → escalate immediately
+            state.transition(Status.ESCALATING, backend="claude")
+            print(f"\n  ↑ escalating to Claude ({role.name}, local error: {e})")
+            ctx = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
+            return call_claude(task, context=ctx), True
 
         # Check if escalation needed
         if should_escalate(response, i, role.max_iters):
@@ -78,7 +82,8 @@ def run_role(role: Role, task: str, state: WorkerState, context: str = "") -> tu
     return call_claude(task, context=ctx), True
 
 
-def run(task: str, skip_review: bool = False, skip_test: bool = False) -> dict:
+def run(task: str, skip_review: bool = False, skip_test: bool = False,
+        force_escalate: bool = False) -> dict:
     state = WorkerState()
     state.transition(Status.READY, task=task)
 
@@ -87,6 +92,14 @@ def run(task: str, skip_review: bool = False, skip_test: bool = False) -> dict:
     context   = ""
 
     print(f"\n◆ CASCADE — {task[:80]}\n")
+
+    if force_escalate:
+        print("● Claude (forced escalation)")
+        code = call_claude(task)
+        results["programmer"] = code
+        results["escalated"]  = True
+        state.transition(Status.COMPLETE)
+        return results
 
     # ── Programmer ──
     print("● Programmer (local)")
@@ -116,7 +129,11 @@ def run(task: str, skip_review: bool = False, skip_test: bool = False) -> dict:
     if not skip_test:
         # ── Tester ──
         print("● Tester (local)")
-        test_task = f"Test this implementation:\n\n{context}"
+        test_task = (
+            f"Original task: {task}\n\n"
+            f"Implementation to test:\n\n{context}\n\n"
+            f"Run it, verify it works, report PASS or FAIL."
+        )
         test_result, esc = run_role(TESTER, test_task, state, context)
         results["tester"] = test_result
         escalated = escalated or esc
