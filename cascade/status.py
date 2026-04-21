@@ -2,9 +2,11 @@
 cascade status — live agent dashboard in the terminal.
 """
 
-import json, subprocess, urllib.request
+import json, subprocess, urllib.request, yaml
 from pathlib import Path
 from datetime import datetime
+
+_CONFIG_PATH = Path(__file__).parent.parent / "config.yml"
 
 C_GREEN  = "\033[92m"
 C_BLUE   = "\033[94m"
@@ -15,14 +17,33 @@ C_BOLD   = "\033[1m"
 C_RESET  = "\033[0m"
 
 
-def _check_ollama() -> tuple[bool, list[str]]:
+def _check_providers() -> list[tuple[str, bool, str]]:
+    """Returns list of (name, is_ok, detail)."""
+    results = []
     try:
-        urllib.request.urlopen("http://localhost:11434", timeout=2)
-        r = subprocess.run(["ollama", "list"], capture_output=True, text=True, timeout=5)
-        models = [l.split()[0] for l in r.stdout.splitlines()[1:] if l.strip()]
-        return True, models
+        cfg = yaml.safe_load(_CONFIG_PATH.read_text()).get("providers", {})
     except Exception:
-        return False, []
+        return []
+
+    for name, pcfg in cfg.items():
+        t = pcfg.get("type")
+        if t == "cli":
+            bin_path = Path(pcfg.get("bin", "")).expanduser()
+            ok = bin_path.exists()
+            results.append((name, ok, str(bin_path) if ok else "not found"))
+        elif t == "ollama":
+            try:
+                url = pcfg.get("url", "http://localhost:11434/api/chat").replace("/api/chat", "")
+                urllib.request.urlopen(url, timeout=2)
+                results.append((name, True, pcfg.get("model", "")))
+            except Exception:
+                results.append((name, False, "ollama offline"))
+        elif t == "api":
+            import os
+            key_env = pcfg.get("api_key_env", "")
+            ok = bool(os.environ.get(key_env))
+            results.append((name, ok, f"{key_env} {'set' if ok else 'not set'}"))
+    return results
 
 
 def _check_mempalace() -> str:
@@ -60,11 +81,11 @@ def show():
     now = datetime.now().strftime("%A %d %B %Y  ·  %H:%M")
     print(f"\n{C_BOLD}{C_GREEN}◆ CASCADE STATUS{C_RESET}  {C_DIM}{now}{C_RESET}\n")
 
-    # ── Ollama ──
-    ok, models = _check_ollama()
-    status_str = f"{C_GREEN}✓ running{C_RESET}" if ok else f"{C_RED}✗ offline{C_RESET}"
-    model_str  = f"  {C_DIM}{', '.join(models)}{C_RESET}" if models else ""
-    print(f"  Ollama       {status_str}{model_str}")
+    # ── Providers ──
+    for name, ok, detail in _check_providers():
+        status_str = f"{C_GREEN}✓ ready{C_RESET}" if ok else f"{C_RED}✗ {detail}{C_RESET}"
+        detail_str = f"  {C_DIM}{detail}{C_RESET}" if ok and detail else ""
+        print(f"  {name:<14}{status_str}{detail_str}")
 
     # ── MemPalace ──
     mp = _check_mempalace()

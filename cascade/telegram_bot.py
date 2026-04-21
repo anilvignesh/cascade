@@ -1,7 +1,6 @@
 """
 Cascade Telegram bot — handles text, documents, voice, and images.
-Powered by Qwen3 locally, escalates to Claude when needed.
-All exchanges saved to MemPalace.
+Gemini routes, Claude codes. All exchanges saved to memory.
 
 Setup:
   export TELEGRAM_TOKEN=...
@@ -30,9 +29,9 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-from .repl    import ask_local, ask_claude, ask_gemini, mem_save, mem_search
-from .profile import load as load_profile
-from .llm     import call_claude, call_gemini, route_query
+from .llm     import call_role
+from .memory  import search as mem_search, save as mem_save, recall
+from .repl    import route_query, _build_context
 from .parsers import extract
 
 TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "")
@@ -62,7 +61,7 @@ async def _reply(update: Update, text: str, backend: str = ""):
     label = {
         "claude": "🔵 _Claude_",
         "gemini": "🟣 _Gemini_",
-        "local":  "🟡 _Qwen3_",
+        "local":  "🟡 _Local_",
     }.get(backend, "")
     chunks = _chunks(text)
     for i, chunk in enumerate(chunks):
@@ -93,22 +92,18 @@ async def _respond(update: Update, ctx: ContextTypes.DEFAULT_TYPE,
                 route_type, route_value, clean_query = "model", "gemini", full_query
 
         if route_type == "skill":
-            mem      = mem_search(clean_query or full_query)
-            response = run_skill(route_value, clean_query)
+            memory   = recall(clean_query or full_query)
+            context  = _build_context(session, memory)
+            response = run_skill(route_value, clean_query, context)
             await _reply(update, response, f"skill:{route_value}")
             mem_save(query, response, f"skill:{route_value}")
             return
 
-        mem = mem_search(clean_query)
-        if route_value == "claude":
-            response = ask_claude(clean_query, session, mem)
-            backend  = "claude"
-        elif route_value == "gemini":
-            response = ask_gemini(clean_query, session, mem)
-            backend  = "gemini"
-        else:
-            response = ask_local(clean_query, session, mem)
-            backend  = "local"
+        memory   = recall(clean_query)
+        context  = _build_context(session, memory)
+        role     = "coder" if route_value == "claude" else "researcher"
+        response = call_role(role, clean_query, context)
+        backend  = route_value
 
         session.extend([
             {"role": "user",      "content": clean_query[:500]},
@@ -129,7 +124,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _auth(update):
         return
     await update.message.reply_text(
-        "◆ *Cascade* — Qwen3 · Gemini · Claude\n\n"
+        "◆ *Cascade* — Gemini · Claude\n\n"
         "Send me anything:\n"
         "• A question or task — auto-routed to the right model\n"
         "• A document (PDF, DOCX) — I'll read it\n"
@@ -224,8 +219,7 @@ def _is_system_task(query: str) -> bool:
 
 async def _plan_system_task(query: str) -> str:
     """Ask Claude to determine the exact command to run."""
-    from .llm import call_claude
-    response = call_claude(
+    response = call_role("coder",
         f"The user wants to: {query}\n\n"
         f"Respond with ONLY the exact bash command to run. "
         f"Nothing else — no explanation, no markdown, just the command."
@@ -390,7 +384,8 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             img_path = tmp.name
 
         # Claude can handle images via file path prompt
-        response = call_claude(
+        response = call_role(
+            "coder",
             f"The user sent an image with caption: '{caption}'. "
             f"Image saved at: {img_path}. "
             f"Read the image and respond to the caption."

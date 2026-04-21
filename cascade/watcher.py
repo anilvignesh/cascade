@@ -10,7 +10,7 @@ import json, os, time, subprocess, hashlib
 from datetime import datetime
 from pathlib import Path
 
-SEEN_FILE  = Path.home() / ".jarvis" / "cache" / "watcher_seen.json"
+SEEN_FILE  = Path.home() / ".cascade" / "watcher_seen.json"
 ENV_FILE   = Path.home() / ".cascade.env"
 
 SCORE_THRESHOLD = "high"  # only alert on high-fit jobs
@@ -68,8 +68,6 @@ def _send_telegram(message: str):
 
 
 def check_jobs(seen: set) -> tuple[list[str], set]:
-    import sys
-    sys.path.insert(0, str(Path.home() / ".jarvis"))
 
     alerts = []
     try:
@@ -108,8 +106,6 @@ def check_jobs(seen: set) -> tuple[list[str], set]:
 
 
 def check_news(seen: set) -> tuple[list[str], set]:
-    import sys
-    sys.path.insert(0, str(Path.home() / ".jarvis"))
 
     alerts = []
     try:
