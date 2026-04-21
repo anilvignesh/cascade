@@ -131,6 +131,19 @@ def run():
         query = raw[2:].strip() if force_claude else raw
 
         try:
+            # Check for skill invocation (/skillname ...)
+            from .skills import detect_skill, run_skill
+            skill_name = detect_skill(query)
+            if skill_name:
+                skill_query = " ".join(query.split()[1:])
+                print(f"  {C_DIM}[skill: {skill_name}]{C_RESET}\n", flush=True)
+                response = run_skill(skill_name, skill_query)
+                print(response)
+                print()
+                mem_save(query, response, f"skill:{skill_name}")
+                history.append((query, response, f"skill:{skill_name}"))
+                continue
+
             mode_hint = "claude" if force_claude else route(query)
             label = f"{C_BLUE}Claude{C_RESET}" if mode_hint == "claude" else f"{C_GOLD}Qwen3{C_RESET}"
             print(f"  {C_DIM}[{label}{C_DIM}]{C_RESET}", end="\n\n", flush=True)

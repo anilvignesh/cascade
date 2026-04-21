@@ -100,18 +100,37 @@ python run.py "write a Python script that monitors disk usage and alerts at 90%"
 ## Usage
 
 ```bash
-# Full pipeline: programmer → reviewer → tester
-python run.py "build a REST API client for the GitHub API"
+# Open interactive REPL (like the claude CLI)
+cascade
+
+# Single task — full agent pipeline
+cascade "build a REST API client for the GitHub API"
 
 # Skip testing (for non-executable tasks)
-python run.py "refactor utils.py to use dataclasses" --no-test
+cascade "refactor utils.py to use dataclasses" --no-test
 
-# Skip review (for quick tasks)
-python run.py "add a __repr__ method to User class" --no-review --no-test
+# Force Claude escalation
+cascade "architect a distributed payment system" --escalate
 
-# JSON output (pipe-friendly)
-python run.py "write a fibonacci function" --no-review --json
+# Agent + system dashboard
+cascade status
+
+# Start Telegram bot (requires TELEGRAM_TOKEN env var)
+cascade bot
+
+# List installed skills
+cascade skills
 ```
+
+### REPL shortcuts
+
+| Input | Action |
+|-------|--------|
+| `!! <query>` | Force Claude (skip local) |
+| `/graphify <text>` | Save to MemPalace knowledge graph |
+| `history` | Show last 10 queries |
+| `clear` | Clear history |
+| `exit` | Quit |
 
 ---
 
@@ -158,17 +177,23 @@ The escalation layer means you never sacrifice quality. You just pay for it only
 ```
 cascade/
 ├── cascade/
-│   ├── agent.py     # main loop — orchestrates roles
-│   ├── tools.py     # tool registry (bash, read, write, edit, grep, glob)
-│   ├── roles.py     # programmer / reviewer / tester definitions
-│   ├── state.py     # state machine + atomic file writes
-│   └── llm.py       # Qwen3 (local) + Claude CLI (escalation)
+│   ├── agent.py          # coding agent loop — Programmer → Reviewer → Tester
+│   ├── repl.py           # interactive REPL with MemPalace memory
+│   ├── tools.py          # tool registry (bash, read, write, edit, grep, glob)
+│   ├── roles.py          # role definitions + system prompts
+│   ├── state.py          # state machine + atomic file writes
+│   ├── llm.py            # Qwen3 (local) + Claude CLI (escalation)
+│   ├── skills.py         # pluggable skills system
+│   ├── status.py         # terminal dashboard
+│   └── telegram_bot.py   # Telegram interface
+├── skills/
+│   └── graphify/         # /graphify skill — save to MemPalace KG
 ├── examples/
 │   └── demo.sh
 ├── config.yml
-├── run.py           # CLI entry point
+├── run.py                # CLI entry point
 └── .agent/
-    └── worker-state.json   # live agent state (gitignored)
+    └── worker-state.json # live agent state (gitignored)
 ```
 
 ---
@@ -181,11 +206,15 @@ cascade/
 
 ## Roadmap
 
+- [x] Interactive REPL (`cascade` command)
+- [x] MemPalace shared memory — both models read/write same store
+- [x] Skills system — `/skill <args>` in REPL
+- [x] Telegram bot — send tasks from phone, results come back
+- [x] `cascade status` dashboard
 - [ ] `--watch` mode: stream `.agent/worker-state.json` to terminal live
 - [ ] Persistent task history in SQLite
 - [ ] Swap local model at runtime (`--model qwen3:32b`)
-- [ ] Telegram interface — send tasks from phone, get results back
-- [ ] Web UI dashboard
+- [ ] Auto-start Telegram bot on login
 
 ---
 
