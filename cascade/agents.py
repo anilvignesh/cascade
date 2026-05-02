@@ -176,17 +176,18 @@ Write a clear, direct final response to the original task."""
 
 class Orchestrator:
     def run(self, task: str, context: str = "") -> str:
+        from .llm import get_role_provider, is_online
         agents      = list_agents()
         agent_desc  = "\n".join(f"  {name}: {desc}" for name, desc in agents.items())
 
-        # Step 1 — Plan
-        print(f"\n◆ ORCHESTRATOR — planning: {task[:60]}\n")
-        plan_response = call_role("interpreter",
+        # Step 1 — Plan (groq → cerebras → local offline fallback)
+        planner = "local" if not is_online() else get_role_provider("planner")
+        print(f"\n◆ ORCHESTRATOR [{planner}] — planning: {task[:60]}\n")
+        plan_response = call_role("planner",
                                    _PLAN_PROMPT.format(agents=agent_desc, task=task))
 
         steps = self._parse_plan(plan_response)
         if not steps:
-            # Fallback: route directly as a single general task
             print("  [orchestrator] no valid plan, routing as general task")
             return call_role("general", task, context)
 
@@ -194,16 +195,17 @@ class Orchestrator:
         step_outputs: dict[int, str] = {}
         self._execute_steps(steps, step_outputs, task, context, len(steps))
 
-        # Step 3 — Synthesise
+        # Step 3 — Synthesise (groq → cerebras → local offline fallback)
         if len(step_outputs) == 1:
             return next(iter(step_outputs.values()))
 
+        synthesiser = "local" if not is_online() else get_role_provider("synthesiser")
         outputs_str = "\n\n".join(
             f"[Step {i+1} — {steps[i].get('agent')}]\n{out}"
             for i, out in step_outputs.items()
         )
-        print(f"\n  [orchestrator] synthesising {len(steps)} outputs...")
-        return call_role("researcher",
+        print(f"\n  [orchestrator] synthesising {len(steps)} outputs via {synthesiser}...")
+        return call_role("synthesiser",
                           _SYNTHESIS_PROMPT.format(task=task, outputs=outputs_str))
 
     def _run_step(self, i: int, step: dict, step_outputs: dict,
@@ -212,8 +214,14 @@ class Orchestrator:
         sub_task   = step.get("task", task)
         depends_on = step.get("depends_on")
 
-        dep_ctx  = f"Prior step output:\n{step_outputs[depends_on]}" \
-                   if depends_on is not None and depends_on in step_outputs else ""
+        # depends_on can be int, list of ints, or None
+        if depends_on is not None:
+            deps = depends_on if isinstance(depends_on, list) else [depends_on]
+            dep_parts = [f"Prior step output:\n{step_outputs[d]}"
+                         for d in deps if d in step_outputs]
+            dep_ctx = "\n\n".join(dep_parts)
+        else:
+            dep_ctx = ""
         full_ctx = "\n\n".join(filter(None, [context, dep_ctx]))
 
         print(f"  [{i+1}/{total}] {agent_name}: {sub_task[:60]}")
@@ -231,10 +239,14 @@ class Orchestrator:
 
         while remaining:
             # Find steps whose dependency is already resolved (or has none)
-            ready = [
-                (i, s) for i, s in remaining
-                if s.get("depends_on") is None or s.get("depends_on") in step_outputs
-            ]
+            def _deps_met(s: dict) -> bool:
+                d = s.get("depends_on")
+                if d is None:
+                    return True
+                deps = d if isinstance(d, list) else [d]
+                return all(dep in step_outputs for dep in deps)
+
+            ready = [(i, s) for i, s in remaining if _deps_met(s)]
 
             if not ready:
                 # Shouldn't happen with a valid plan, but avoid infinite loop

@@ -1,28 +1,60 @@
 providers:
+  # ── Paid CLI (no API cost) ────────────────────────────────────────────────
   gemini:
     type: cli
     bin: ~/.local/bin/gemini
     prompt_flag: "-p"
     args: ["--yolo"]
+
   claude:
     type: cli
     bin: ~/.local/bin/claude
     prompt_flag: "-p"
     args: ["--allowedTools", "Bash,Read,Write,Edit,Glob,Grep", "--dangerously-skip-permissions"]
-  # local:
-  #   type: ollama
-  #   model: gemma3
-  #   url: http://localhost:11434/api/chat
+
+  # ── Local (offline capable) ───────────────────────────────────────────────
+  local:
+    type: ollama
+    model: qwen3-fast
+    url: http://localhost:11434/api/chat
+
+  # ── Free APIs (OpenAI-compatible) ─────────────────────────────────────────
+  groq:
+    type: api
+    base_url: https://api.groq.com/openai/v1
+    model: llama-3.3-70b-versatile
+    api_key_env: GROQ_API_KEY
+
+  cerebras:
+    type: api
+    base_url: https://api.cerebras.ai/v1
+    model: llama3.1-8b
+    api_key_env: CEREBRAS_API_KEY
+
+  openrouter:
+    type: api
+    base_url: https://openrouter.ai/api/v1
+    model: openrouter/auto
+    api_key_env: OPENROUTER_API_KEY
+
+# ── Roles ──────────────────────────────────────────────────────────────────────
+# Each role accepts a single provider or a priority list.
+# Providers are tried in order; remote ones are skipped when offline.
+# interpreter has no local fallback — repl.py falls back to rule-based routing.
 
 roles:
-  interpreter: gemini   # routing, intent classification
-  coder:       claude   # implementation, debugging, architecture
-  researcher:  gemini   # research, analysis, drafting
-  general:     gemini   # fallback for everything else
-  programmer:  claude
-  reviewer:    gemini
-  tester:      gemini
+  interpreter: [groq, cerebras, openrouter]  # routing decisions — fast free APIs
+  planner:     [groq, cerebras, local]       # orchestration planning — local fallback offline
+  synthesiser: [groq, cerebras, local]       # result synthesis — local fallback offline
+  coder:       [claude]                       # implementation, debugging
+  researcher:  [gemini]                       # research, analysis, drafting
+  general:     [gemini, groq, local]           # quality first (paid CLI), groq fallback
+  programmer:  [claude]
+  reviewer:    [gemini]
+  tester:      [gemini]
+  local_chat:  [local]                        # forced local / private queries
 
+# ── Permissions ────────────────────────────────────────────────────────────────
 permissions:
   gemini:
     can_read_files:    false
@@ -36,11 +68,36 @@ permissions:
     can_run_commands:  true
     can_access_memory: true
     can_call_models:   false
+  groq:
+    can_read_files:    false
+    can_write_files:   false
+    can_run_commands:  false
+    can_access_memory: true
+    can_call_models:   false
+  cerebras:
+    can_read_files:    false
+    can_write_files:   false
+    can_run_commands:  false
+    can_access_memory: true
+    can_call_models:   false
+  openrouter:
+    can_read_files:    false
+    can_write_files:   false
+    can_run_commands:  false
+    can_access_memory: true
+    can_call_models:   false
+  local:
+    can_read_files:    false
+    can_write_files:   false
+    can_run_commands:  false
+    can_access_memory: true
+    can_call_models:   false
 
+# ── Agents ─────────────────────────────────────────────────────────────────────
 agents:
   researcher:
     role: researcher
-    tools: [bash, read_file, glob, grep]
+    tools: [bash, read_file, glob, grep, search]
     max_iters: 6
     system_prompt: "You are a research agent. Gather information, analyse, and summarise clearly."
 
@@ -63,7 +120,7 @@ agents:
     system_prompt: "You are an analyst. Synthesise data, identify patterns, produce structured insights."
 
 orchestrator:
-  max_parallel: 3   # max simultaneous agent subprocesses
+  max_parallel: 3
 
 memory:
   backend:      file

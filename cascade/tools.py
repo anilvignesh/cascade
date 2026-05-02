@@ -18,7 +18,7 @@ def tool(name):
 
 
 @tool("bash")
-def bash(command: str, timeout: int = 30) -> tuple[str, str | None]:
+def bash(command: str, timeout: int = 300) -> tuple[str, str | None]:
     try:
         r = subprocess.run(
             command, shell=True, capture_output=True,
@@ -83,6 +83,19 @@ def grep(pattern: str, path: str = ".", file_glob: str = "*") -> tuple[str, str 
         return r.stdout.strip() or "(no matches)", None
     except Exception as e:
         return "", str(e)
+
+
+@tool("search")
+def search(query: str) -> tuple[str, str | None]:
+    \"\"\"Deep research using Gemini.\"\"\"
+    from .llm import call_role
+    try:
+        # We explicitly tell Gemini to do a deep research task
+        prompt = f\"RESEARCH TASK: {query}\\n\\nFind latest data, verify facts, and provide a structured summary.\"
+        res = call_role(\"researcher\", prompt)
+        return res.strip(), None
+    except Exception as e:
+        return \"\", str(e)
 
 
 def execute(name: str, args: dict, allowed: list[str]) -> tuple[str, str | None]:

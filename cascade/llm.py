@@ -4,21 +4,24 @@ LLM provider registry — config-driven, transport-agnostic.
 Transports:
   cli    — subprocess call to a CLI binary (Gemini, Claude)
   ollama — local model via Ollama HTTP API
-  api    — direct API access (optional, requires key)
+  api    — OpenAI-compatible REST API (Groq, Cerebras, OpenRouter, etc.)
 
 Entry point: call_role(role, prompt, context)
+
+Roles support a priority list — providers are tried in order.
+Remote providers (cli, api) are skipped when offline; local (ollama) always runs.
 """
 
-import json, subprocess, urllib.request, yaml
-from dataclasses import dataclass, field
+import json, os, socket, subprocess, urllib.request, yaml
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
 CONFIG_PATH  = Path(__file__).parent.parent / "config.yml"
 ENGLISH_RULE = "IMPORTANT: Always respond in English only."
 
-_config:    dict = {}
-_registry:  dict = {}
+_config:   dict = {}
+_registry: dict = {}
 
 
 @dataclass
@@ -38,6 +41,19 @@ class TokenStats:
         )
 
 
+# ── Connectivity ──────────────────────────────────────────────────────────────
+
+def is_online(host: str = "8.8.8.8", port: int = 53, timeout: int = 2) -> bool:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect((host, port))
+        s.close()
+        return True
+    except Exception:
+        return False
+
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 def _load_config() -> dict:
@@ -47,9 +63,18 @@ def _load_config() -> dict:
     return _config
 
 
+def _role_providers(role: str) -> list[str]:
+    val = _load_config().get("roles", {}).get(role)
+    if val is None:
+        return []
+    return val if isinstance(val, list) else [val]
+
+
 # ── Providers ─────────────────────────────────────────────────────────────────
 
 class CLIProvider:
+    offline_capable = False
+
     def __init__(self, cfg: dict):
         self.bin         = str(Path(cfg["bin"]).expanduser())
         self.prompt_flag = cfg.get("prompt_flag")
@@ -68,7 +93,7 @@ class CLIProvider:
                  if not l.lower().startswith(("yolo mode", "✻ welcome"))]
         return "\n".join(lines).strip()
 
-    def call(self, prompt: str, context: str = "", timeout: int = 120) -> str:
+    def call(self, prompt: str, context: str = "", timeout: int = 600) -> str:
         full = f"{context}\n\n{prompt}".strip() if context else prompt
         proc = subprocess.run(
             self._build_cmd(full), capture_output=True, text=True, timeout=timeout
@@ -76,7 +101,7 @@ class CLIProvider:
         return self._clean(proc.stdout.strip() or proc.stderr.strip())
 
     def call_with_stats(self, prompt: str, context: str = "",
-                        timeout: int = 120) -> tuple[str, TokenStats]:
+                        timeout: int = 600) -> tuple[str, TokenStats]:
         full = f"{context}\n\n{prompt}".strip() if context else prompt
         proc = subprocess.run(
             self._build_cmd(full, ["--output-format", "json"]),
@@ -92,7 +117,6 @@ class CLIProvider:
             return self._clean(raw), TokenStats()
 
     def _parse_stats(self, data: dict) -> TokenStats:
-        # Gemini CLI JSON: stats.models.<name>.tokens
         gemini_stats = data.get("stats", {}).get("models", {})
         if gemini_stats:
             inp = out = total = 0
@@ -105,7 +129,6 @@ class CLIProvider:
                 model  = name
             return TokenStats(input=inp, output=out, total=total, model=model)
 
-        # Claude CLI JSON: usage.input_tokens / output_tokens
         usage = data.get("usage", {})
         if usage:
             inp  = usage.get("input_tokens", 0)
@@ -119,6 +142,8 @@ class CLIProvider:
 
 
 class OllamaProvider:
+    offline_capable = True
+
     def __init__(self, cfg: dict):
         self.model = cfg["model"]
         self.url   = cfg.get("url", "http://localhost:11434/api/chat")
@@ -132,10 +157,10 @@ class OllamaProvider:
 
     def call(self, prompt: str, context: str = "", timeout: int = 300) -> str:
         payload = json.dumps({
-            "model":   self.model,
+            "model":    self.model,
             "messages": self._messages(prompt, context),
-            "stream":  False,
-            "options": {"num_predict": 2048, "temperature": 0.2},
+            "stream":   False,
+            "options":  {"num_predict": 2048, "temperature": 0.2},
         }).encode()
         req = urllib.request.Request(
             self.url, data=payload,
@@ -146,10 +171,10 @@ class OllamaProvider:
 
     def stream(self, prompt: str, context: str = "", timeout: int = 300) -> Iterator[str]:
         payload = json.dumps({
-            "model":   self.model,
+            "model":    self.model,
             "messages": self._messages(prompt, context),
-            "stream":  True,
-            "options": {"num_predict": 1024, "temperature": 0.2},
+            "stream":   True,
+            "options":  {"num_predict": 1024, "temperature": 0.2},
         }).encode()
         req = urllib.request.Request(
             self.url, data=payload,
@@ -164,17 +189,61 @@ class OllamaProvider:
 
 
 class APIProvider:
-    """Stub for API-based providers (Anthropic, OpenAI, etc.)"""
-    def __init__(self, cfg: dict):
-        self.provider    = cfg["provider"]
-        self.model       = cfg["model"]
-        self.api_key_env = cfg.get("api_key_env")
+    """OpenAI-compatible REST API — covers Groq, Cerebras, OpenRouter, etc."""
+    offline_capable = False
 
-    def call(self, prompt: str, context: str = "", timeout: int = 120) -> str:
-        raise NotImplementedError(
-            f"API provider '{self.provider}' not configured. "
-            f"Set {self.api_key_env} and implement the transport."
+    def __init__(self, cfg: dict):
+        self.base_url    = cfg["base_url"].rstrip("/")
+        self.model       = cfg["model"]
+        self.api_key_env = cfg.get("api_key_env", "")
+
+    def _key(self) -> str:
+        key = os.environ.get(self.api_key_env, "").strip()
+        if not key:
+            raise ValueError(f"API key env var '{self.api_key_env}' is not set")
+        return key
+
+    def _messages(self, prompt: str, context: str) -> list[dict]:
+        msgs = []
+        if context:
+            msgs.append({"role": "system", "content": f"{context}\n\n{ENGLISH_RULE}"})
+        msgs.append({"role": "user", "content": prompt})
+        return msgs
+
+    def _request(self, prompt: str, context: str, timeout: int) -> dict:
+        payload = json.dumps({
+            "model":    self.model,
+            "messages": self._messages(prompt, context),
+            "stream":   False,
+        }).encode()
+        req = urllib.request.Request(
+            f"{self.base_url}/chat/completions",
+            data=payload,
+            headers={
+                "Content-Type":  "application/json",
+                "Authorization": f"Bearer {self._key()}",
+                "User-Agent":    "cascade/1.0",
+            }
         )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read())
+
+    def call(self, prompt: str, context: str = "", timeout: int = 60) -> str:
+        data = self._request(prompt, context, timeout)
+        return data["choices"][0]["message"]["content"].strip()
+
+    def call_with_stats(self, prompt: str, context: str = "",
+                        timeout: int = 60) -> tuple[str, TokenStats]:
+        data  = self._request(prompt, context, timeout)
+        text  = data["choices"][0]["message"]["content"].strip()
+        usage = data.get("usage", {})
+        stats = TokenStats(
+            input  = usage.get("prompt_tokens", 0),
+            output = usage.get("completion_tokens", 0),
+            total  = usage.get("total_tokens", 0),
+            model  = self.model,
+        )
+        return text, stats
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
@@ -193,38 +262,54 @@ def _get_registry() -> dict:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def call_role_with_stats(role: str, prompt: str,
-                         context: str = "") -> tuple[str, TokenStats]:
-    cfg         = _load_config()
-    provider_id = cfg.get("roles", {}).get(role)
-    if not provider_id:
+def _try_providers(role: str, prompt: str,
+                   context: str, with_stats: bool) -> tuple[str, TokenStats]:
+    ids = _role_providers(role)
+    if not ids:
         raise ValueError(f"No provider assigned to role '{role}'")
-    provider = _get_registry().get(provider_id)
-    if not provider:
-        raise ValueError(f"Provider '{provider_id}' not found — check config.yml")
-    if hasattr(provider, "call_with_stats"):
-        return provider.call_with_stats(prompt, context)
-    return provider.call(prompt, context), TokenStats()
+
+    online    = None  # lazy — only check once, only if needed
+    last_err  = Exception(f"No usable provider for role '{role}'")
+    registry  = _get_registry()
+
+    for pid in ids:
+        provider = registry.get(pid)
+        if not provider:
+            continue
+        if not provider.offline_capable:
+            if online is None:
+                online = is_online()
+            if not online:
+                continue
+        try:
+            if with_stats and hasattr(provider, "call_with_stats"):
+                return provider.call_with_stats(prompt, context)
+            return provider.call(prompt, context), TokenStats()
+        except Exception as e:
+            last_err = e
+            continue
+
+    raise last_err
 
 
 def call_role(role: str, prompt: str, context: str = "") -> str:
-    cfg         = _load_config()
-    provider_id = cfg.get("roles", {}).get(role)
-    if not provider_id:
-        raise ValueError(f"No provider assigned to role '{role}'")
-    provider = _get_registry().get(provider_id)
-    if not provider:
-        raise ValueError(f"Provider '{provider_id}' not found — check config.yml")
-    return provider.call(prompt, context)
+    text, _ = _try_providers(role, prompt, context, with_stats=False)
+    return text
+
+
+def call_role_with_stats(role: str, prompt: str,
+                         context: str = "") -> tuple[str, TokenStats]:
+    return _try_providers(role, prompt, context, with_stats=True)
 
 
 def get_role_provider(role: str) -> str:
-    return _load_config().get("roles", {}).get(role, "gemini")
+    ids = _role_providers(role)
+    return ids[0] if ids else "gemini"
 
 
 def has_permission(role: str, permission: str) -> bool:
-    cfg         = _load_config()
-    provider_id = cfg.get("roles", {}).get(role, "gemini")
+    cfg        = _load_config()
+    provider_id = get_role_provider(role)
     return cfg.get("permissions", {}).get(provider_id, {}).get(permission, False)
 
 
@@ -236,7 +321,7 @@ def should_escalate(response: str, iteration: int, max_iters: int) -> bool:
     return any(p in response.lower() for p in uncertainty) or iteration >= max_iters - 1
 
 
-# ── Legacy shims (used by agent.py / repl.py) ─────────────────────────────────
+# ── Legacy shims ──────────────────────────────────────────────────────────────
 
 def call_claude(prompt: str, context: str = "") -> str:
     return call_role("coder", prompt, context)

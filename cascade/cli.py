@@ -17,7 +17,22 @@ Cascade — local-first AI with Claude escalation + MemPalace memory.
   cascade init          → auto-detect CLIs, write config.yml
 """
 
-import sys
+import os, sys
+from pathlib import Path
+
+
+def _load_env():
+    env_file = Path("~/.cascade.env").expanduser()
+    if not env_file.exists():
+        return
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        os.environ.setdefault(key.strip(), val.strip())
+
+_load_env()
 
 
 def main():
@@ -95,6 +110,16 @@ def main():
     if args[0] == "learn":
         from cascade.learn import run as learn_run
         learn_run()
+        return
+
+    if args[0] in ("version", "--version", "-v"):
+        import json
+        from importlib.metadata import version as pkg_version
+        try:
+            v = pkg_version("cascade")
+        except Exception:
+            v = "0.1.0"
+        print(json.dumps({"version": v}))
         return
 
     if args[0] == "skills":

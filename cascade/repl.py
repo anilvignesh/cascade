@@ -12,15 +12,27 @@ from rich.spinner  import Spinner
 from rich.markdown import Markdown
 
 from .llm    import call_role_with_stats, get_role_provider, TokenStats
-from .memory import load_context, recall, save, mempalace_save
+from .memory import load_context, recall, save, consolidate_session
 from .profile import load as load_profile
 
 console = Console()
 
 _PROVIDER_STYLE = {
-    "gemini": "bold magenta",
-    "claude": "bold blue",
-    "local":  "bold yellow",
+    "gemini":     "bold magenta",
+    "claude":     "bold blue",
+    "local":      "bold yellow",
+    "groq":       "bold cyan",
+    "cerebras":   "bold green",
+    "openrouter": "bold white",
+}
+
+_ROLE_MAP = {
+    "claude":     "coder",
+    "gemini":     "researcher",
+    "groq":       "general",
+    "cerebras":   "general",
+    "openrouter": "general",
+    "local":      "local_chat",
 }
 
 ROUTING_PROMPT = """\
@@ -28,15 +40,18 @@ Route user messages. Reply with JSON only — no explanation.
 
 Skills available: plan, draft, jobs, news, email, remind, calendar, system, browse, graphify
 Models:
-  gemini — research, analysis, explanations, general conversation
+  groq   — quick questions, summaries, factual lookups, general chat (fast, free)
+  gemini — deep research, long analysis, document review
   claude — coding, implementing, debugging, architecture, scripts
+  local  — private or sensitive queries, anything that must stay offline
 
-When in doubt, use gemini.
+Prefer groq for most things. Use claude only for code tasks. Use local for private/sensitive.
 
 Examples:
 "research Airwallex"         → {{"type":"skill","value":"plan","args":"research Airwallex"}}
 "write a python script"      → {{"type":"model","value":"claude","args":""}}
-"how do stablecoins work"    → {{"type":"model","value":"gemini","args":""}}
+"how do stablecoins work"    → {{"type":"model","value":"groq","args":""}}
+"explain this privately"     → {{"type":"model","value":"local","args":""}}
 "draft a cover letter"       → {{"type":"skill","value":"draft","args":"cover letter"}}
 
 User message: {query}"""
@@ -60,38 +75,58 @@ def _fmt_session(total: TokenStats) -> str:
     return s
 
 
+_CODE_WORDS   = re.compile(r'\b(code|script|implement|build|refactor|debug|fix|function|class|program|compile|deploy|api|endpoint)\b')
+_GEMINI_WORDS = re.compile(r'\b(research|analyse|analyze|summarise|summarize|document|report|compare|deep.dive)\b')
+_LOCAL_WORDS  = re.compile(r'\b(private|privately|offline|sensitive|confidential|secret)\b')
+
 def route_query(raw: str) -> tuple[str, str, str]:
     q = raw.strip()
+
+    # ── Explicit overrides ────────────────────────────────────────────────────
     if q.startswith("!!"):
         return ("model", "claude", q[2:].strip())
     if q.startswith("!g"):
         return ("model", "gemini", q[2:].strip())
+    if q.startswith("!l"):
+        return ("model", "local", q[2:].strip())
     if q.startswith("/"):
         name = q.split()[0][1:].lower()
         args = " ".join(q.split()[1:])
         return ("skill", name, args)
 
-    try:
-        raw_response, _ = call_role_with_stats(
-            "interpreter", ROUTING_PROMPT.format(query=q)
-        )
-        m = re.search(r'\{[^}]+\}', raw_response, re.DOTALL)
-        if m:
-            import json
-            data = json.loads(m.group())
-            t = data.get("type", "model")
-            v = data.get("value", "gemini")
-            a = str(data.get("args", ""))
-            if t == "skill":
-                return ("skill", v.lower(), a)
-            if v in ("claude", "gemini", "local"):
-                return ("model", v, q)
-    except Exception:
-        pass
-
+    # ── Fast rule-based routing (no API call) ─────────────────────────────────
     lower = q.lower()
-    if any(w in lower for w in ("code", "script", "implement", "build", "refactor", "debug", "fix")):
+    if _LOCAL_WORDS.search(lower):
+        return ("model", "local", q)
+    if _CODE_WORDS.search(lower):
         return ("model", "claude", q)
+    if _GEMINI_WORDS.search(lower):
+        return ("model", "gemini", q)
+
+    # ── LLM routing only for skill detection ─────────────────────────────────
+    # Only call the interpreter if the query might be a skill invocation
+    _SKILL_HINTS = {"plan", "draft", "job", "news", "email", "remind",
+                    "calendar", "browse", "graphify", "schedule", "search"}
+    if any(w in lower for w in _SKILL_HINTS):
+        try:
+            raw_response, _ = call_role_with_stats(
+                "interpreter", ROUTING_PROMPT.format(query=q)
+            )
+            m = re.search(r'\{[^}]+\}', raw_response, re.DOTALL)
+            if m:
+                import json
+                data = json.loads(m.group())
+                t = data.get("type", "model")
+                v = data.get("value", "groq")
+                a = str(data.get("args", ""))
+                if t == "skill":
+                    return ("skill", v.lower(), a)
+                if v in _ROLE_MAP:
+                    return ("model", v, q)
+        except Exception:
+            pass
+
+    # ── Default: Gemini (quality, already paid) ──────────────────────────────
     return ("model", "gemini", q)
 
 
@@ -118,7 +153,7 @@ def _build_context(session_msgs: list[dict], memory: dict) -> str:
     return "\n\n".join(parts)
 
 
-def _print_session_summary(total: TokenStats):
+def _print_session_summary(total: TokenStats, session_msgs: list):
     console.print()
     if total.total:
         s = f"[dim]session total: {total.total:,} tokens"
@@ -126,6 +161,7 @@ def _print_session_summary(total: TokenStats):
             s += f"  ${total.cost_usd:.4f}"
         console.print(f"  {s}[/]")
     console.print("[dim]bye[/]\n")
+    consolidate_session(session_msgs)  # async — returns immediately
 
 
 def _prompt(is_busy: bool, queued: int) -> str:
@@ -175,14 +211,14 @@ def run():
         raw = work_q.get()
 
         if raw is None:
-            _print_session_summary(session_total)
+            _print_session_summary(session_total, session_msgs)
             break
 
         raw = raw.strip()
         if not raw:
             continue
         if raw.lower() in ("exit", "quit", "q"):
-            _print_session_summary(session_total)
+            _print_session_summary(session_total, session_msgs)
             break
         if raw.lower() == "history":
             if not history:
@@ -227,7 +263,6 @@ def run():
                     border_style="dim",
                 ))
                 save(raw, response, f"skill:{route_value}")
-                mempalace_save(raw, response, f"skill:{route_value}")
                 history.append((raw, response, f"skill:{route_value}"))
                 console.print()
                 is_busy.clear()
@@ -235,7 +270,7 @@ def run():
 
             memory   = recall(raw)
             context  = _build_context(session_msgs, memory)
-            role     = "coder" if route_value == "claude" else "researcher"
+            role     = _ROLE_MAP.get(route_value, "general")
             provider = get_role_provider(role)
             style    = _PROVIDER_STYLE.get(provider, "dim")
             label    = route_value.capitalize()
@@ -266,7 +301,6 @@ def run():
             session_msgs.append({"role": "assistant",  "content": response})
 
             save(raw, response, route_value)
-            mempalace_save(raw, response, route_value)
             history.append((raw, response, route_value))
 
         except KeyboardInterrupt:
