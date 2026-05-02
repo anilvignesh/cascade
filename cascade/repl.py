@@ -179,7 +179,7 @@ def _build_context(session_msgs: list[dict], memory: dict, query: str = "") -> s
     parts = [
         f"You are Cascade, an AI assistant.\n"
         f"Be direct and concise. Today: {datetime.today():%A %d %B %Y}.\n"
-        f"If you don't know something or lack current information, say so — never make up facts."
+        f"If you don't know something, say 'I don't have access to that' — never fabricate. Never say 'training data' or 'knowledge cutoff' — just answer directly or admit the gap plainly."
     ]
     if rom:     parts.append(f"Persistent context:\n{rom}")
     if profile: parts.append(f"User profile:\n{profile}")

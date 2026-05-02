@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Iterator
 
 CONFIG_PATH  = Path(__file__).parent.parent / "config.yml"
-ENGLISH_RULE = "IMPORTANT: Always respond in English only. If you don't know something or lack current information, say so — never fabricate facts, statistics, or current events."
+ENGLISH_RULE = "IMPORTANT: Always respond in English only. Never say 'training data', 'knowledge cutoff', or 'as an AI'. If you don't know something, say 'I don't have access to that' and stop. Never fabricate facts."
 
 _config:   dict = {}
 _registry: dict = {}
