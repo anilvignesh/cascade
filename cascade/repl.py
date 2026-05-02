@@ -75,9 +75,31 @@ def _fmt_session(total: TokenStats) -> str:
     return s
 
 
-_CODE_WORDS   = re.compile(r'\b(code|script|implement|build|refactor|debug|fix|function|class|program|compile|deploy|api|endpoint)\b')
-_GEMINI_WORDS = re.compile(r'\b(research|analyse|analyze|summarise|summarize|document|report|compare|deep.dive)\b')
-_LOCAL_WORDS  = re.compile(r'\b(private|privately|offline|sensitive|confidential|secret)\b')
+_CODE_WORDS    = re.compile(r'\b(code|script|implement|build|refactor|debug|fix|function|class|program|compile|deploy|api|endpoint)\b')
+_GEMINI_WORDS  = re.compile(r'\b(research|analyse|analyze|summarise|summarize|document|report|compare|deep.dive)\b')
+_LOCAL_WORDS   = re.compile(r'\b(private|privately|offline|sensitive|confidential|secret)\b')
+_SYSAGENT_WORDS = re.compile(
+    # Unambiguous hardware state — always system
+    r'\bbattery\b|\bcharging\b|\bbluetooth\s+devices?\b'
+    # WiFi only when asking about state/availability (not "how does wifi work")
+    r'|\bwifi\s+networks?\b|\bwireless\s+networks?\b'
+    r'|\bavailable\s+(?:wifi|networks?|wireless)\b'
+    r'|\bconnected\s+(?:to\s+)?(?:wifi|network)\b'
+    # Disk/storage with explicit size intent
+    r'|\bdisk\s+(?:space|usage|free)\b|\bfree\s+(?:space|disk)\b|\bstorage\s+(?:space|usage|free)\b'
+    r'|\bhow\s+much\s+(?:ram|memory|disk|space|storage)\b'
+    # Package management (always system action)
+    r'|\b(?:install|uninstall|apt(?:-get)?)\s+\w+\b'
+    r'|\bupdate\s+(?:the\s+)?(?:system|packages?|apt)\b'
+    # Service / process management
+    r'|\bsystemctl\b'
+    r'|\brestart\s+\w+(?:service|daemon)\b'
+    # Explicit current-state queries
+    r'|\bwhat(?:\s+(?:is|are))?\s+(?:my|the|available)\s+(?:ip|networks?|processes?|services?|memory|ram)\b'
+    r'|\b(?:check|show|list)\s+(?:my\s+)?(?:wifi|network|disk|memory|battery|services?|processes?|ip)\b'
+    r'|\bmy\s+(?:ip|wifi|network|battery|disk|memory|ram)\b',
+    re.I
+)
 
 # ── System context — real-time bash data injected before LLM call ─────────────
 _SYSTEM_PROBES = [
@@ -129,6 +151,8 @@ def route_query(raw: str) -> tuple[str, str, str]:
         return ("model", "gemini", q[2:].strip())
     if q.startswith("!l"):
         return ("model", "local", q[2:].strip())
+    if q.startswith("!s"):
+        return ("agent", "sysagent", q[2:].strip() or q)
     if q.startswith("/"):
         name = q.split()[0][1:].lower()
         args = " ".join(q.split()[1:])
@@ -142,6 +166,8 @@ def route_query(raw: str) -> tuple[str, str, str]:
         return ("model", "claude", q)
     if _GEMINI_WORDS.search(lower):
         return ("model", "gemini", q)
+    if _SYSAGENT_WORDS.search(lower):
+        return ("agent", "sysagent", q)
 
     # ── LLM routing only for skill detection ─────────────────────────────────
     # Only call the interpreter if the query might be a skill invocation
@@ -218,8 +244,8 @@ def _prompt(is_busy: bool, queued: int) -> str:
 def run():
     console.print()
     console.print(Panel(
-        "[bold green]◆ CASCADE[/]   [dim]Gemini · Claude  ·  "
-        "[bold]!![/] claude  ·  [bold]!g[/] gemini  ·  "
+        "[bold green]◆ CASCADE[/]   [dim]Groq · Gemini · Claude  ·  "
+        "[bold]!![/] claude  ·  [bold]!g[/] gemini  ·  [bold]!s[/] sysagent  ·  "
         "[bold]/skill[/]  ·  exit[/]",
         border_style="green",
         padding=(0, 2),
@@ -291,6 +317,38 @@ def run():
 
             if route_type == "skill" and not skill_exists(route_value):
                 route_type, route_value, clean_query = "model", "gemini", raw
+
+            # ── Agent route (sysagent and future agents) ──────────────────────
+            if route_type == "agent":
+                from .agents import get_agent
+                memory  = recall(clean_query or raw)
+                context = _build_context(session_msgs, memory, clean_query or raw)
+                try:
+                    agent = get_agent(route_value)
+                except ValueError:
+                    route_type, route_value, clean_query = "model", "groq", raw
+                else:
+                    console.print(f"\n  [bold yellow]◆ {route_value.capitalize()}[/] [dim]— local, offline capable[/]\n")
+
+                    def _on_tool(name, args):
+                        cmd = args.get("command", args.get("path", "?"))
+                        console.print(f"  [dim cyan][{name}][/] [dim]{cmd[:100]}[/]")
+
+                    response, _ = agent.run(clean_query or raw, context, progress_cb=_on_tool)
+                    console.print()
+                    console.print(Panel(
+                        Markdown(response),
+                        title="[bold yellow]SysAgent[/]",
+                        border_style="dim",
+                        padding=(1, 2),
+                    ))
+                    console.print()
+                    session_msgs.append({"role": "user",      "content": clean_query or raw})
+                    session_msgs.append({"role": "assistant",  "content": response})
+                    save(raw, response, route_value)
+                    history.append((raw, response, route_value))
+                    is_busy.clear()
+                    continue
 
             if route_type == "skill":
                 memory  = recall(clean_query or raw)

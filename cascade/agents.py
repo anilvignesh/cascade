@@ -64,10 +64,12 @@ class Agent:
     max_iters:     int       = 8
     system_prompt: str       = ""
 
-    def run(self, task: str, context: str = "") -> tuple[str, bool]:
+    def run(self, task: str, context: str = "",
+            progress_cb=None) -> tuple[str, bool]:
         """
         ReAct loop: think → parse tools → execute → observe → repeat.
         Returns (response, escalated).
+        progress_cb(tool_name, args) — called before each tool execution.
         """
         transcript: list[str] = []
 
@@ -86,7 +88,7 @@ class Agent:
             if not tool_calls:
                 return response, False
 
-            results = self._execute_tools(tool_calls)
+            results = self._execute_tools(tool_calls, progress_cb)
             transcript.append(f"THOUGHT:\n{response}")
             transcript.append(f"OBSERVATION:\n{results}")
 
@@ -111,9 +113,11 @@ class Agent:
             )
         return "\n\n".join(parts)
 
-    def _execute_tools(self, calls: list[tuple[str, dict]]) -> str:
+    def _execute_tools(self, calls: list[tuple[str, dict]], progress_cb=None) -> str:
         results = []
         for name, args in calls:
+            if progress_cb:
+                progress_cb(name, args)
             out, err = execute(name, args, self.tools)
             results.append(f"[{name}] {'ERROR: ' + err if err else out[:2000]}")
         return "\n".join(results)
