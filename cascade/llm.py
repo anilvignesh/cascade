@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Iterator
 
 CONFIG_PATH  = Path(__file__).parent.parent / "config.yml"
-ENGLISH_RULE = "IMPORTANT: Always respond in English only."
+ENGLISH_RULE = "IMPORTANT: Always respond in English only. If you don't know something or lack current information, say so — never fabricate facts, statistics, or current events."
 
 _config:   dict = {}
 _registry: dict = {}
@@ -244,6 +244,39 @@ class APIProvider:
             model  = self.model,
         )
         return text, stats
+
+    def stream(self, prompt: str, context: str = "", timeout: int = 60) -> Iterator[str]:
+        payload = json.dumps({
+            "model":    self.model,
+            "messages": self._messages(prompt, context),
+            "stream":   True,
+        }).encode()
+        req = urllib.request.Request(
+            f"{self.base_url}/chat/completions",
+            data=payload,
+            headers={
+                "Content-Type":  "application/json",
+                "Authorization": f"Bearer {self._key()}",
+                "User-Agent":    "cascade/1.0",
+            }
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            for raw_line in resp:
+                line = raw_line.decode().strip()
+                if not line or not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                    choices = chunk.get("choices", [])
+                    if choices:
+                        content = choices[0].get("delta", {}).get("content")
+                        if content:
+                            yield content
+                except Exception:
+                    pass
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────

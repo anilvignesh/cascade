@@ -48,7 +48,7 @@ roles:
   synthesiser: [groq, cerebras, local]       # result synthesis — local fallback offline
   coder:       [claude]                       # implementation, debugging
   researcher:  [gemini]                       # research, analysis, drafting
-  general:     [gemini, groq, local]           # quality first (paid CLI), groq fallback
+  general:     [groq, cerebras, gemini, local]  # groq default (fast+free), gemini deep research fallback
   programmer:  [claude]
   reviewer:    [gemini]
   tester:      [gemini]

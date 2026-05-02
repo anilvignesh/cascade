@@ -11,7 +11,7 @@ from rich.panel    import Panel
 from rich.spinner  import Spinner
 from rich.markdown import Markdown
 
-from .llm    import call_role_with_stats, get_role_provider, TokenStats
+from .llm    import call_role_with_stats, get_role_provider, TokenStats, _get_registry
 from .memory import load_context, recall, save, consolidate_session
 from .profile import load as load_profile
 
@@ -126,8 +126,8 @@ def route_query(raw: str) -> tuple[str, str, str]:
         except Exception:
             pass
 
-    # ── Default: Gemini (quality, already paid) ──────────────────────────────
-    return ("model", "gemini", q)
+    # ── Default: Groq (fast, free, ~300 tok/s) ───────────────────────────────
+    return ("model", "groq", q)
 
 
 def _build_context(session_msgs: list[dict], memory: dict) -> str:
@@ -138,7 +138,8 @@ def _build_context(session_msgs: list[dict], memory: dict) -> str:
 
     parts = [
         f"You are Cascade, an AI assistant.\n"
-        f"Be direct and concise. Today: {datetime.today():%A %d %B %Y}."
+        f"Be direct and concise. Today: {datetime.today():%A %d %B %Y}.\n"
+        f"If you don't know something or lack current information, say so — never make up facts."
     ]
     if rom:     parts.append(f"Persistent context:\n{rom}")
     if profile: parts.append(f"User profile:\n{profile}")
@@ -268,31 +269,53 @@ def run():
                 is_busy.clear()
                 continue
 
-            memory   = recall(raw)
-            context  = _build_context(session_msgs, memory)
-            role     = _ROLE_MAP.get(route_value, "general")
-            provider = get_role_provider(role)
-            style    = _PROVIDER_STYLE.get(provider, "dim")
-            label    = route_value.capitalize()
+            memory        = recall(raw)
+            context       = _build_context(session_msgs, memory)
+            role          = _ROLE_MAP.get(route_value, "general")
+            registry      = _get_registry()
+            provider_obj  = registry.get(route_value)
+            actual_pid    = route_value if provider_obj else get_role_provider(role)
+            style         = _PROVIDER_STYLE.get(actual_pid, "dim")
+            label         = route_value.capitalize()
+            stats         = TokenStats()
 
-            # ── Model call spinner ──
-            with Live(
-                Spinner("dots", text=f" [dim]{label} thinking...[/]"),
-                console=console, refresh_per_second=12, transient=True
-            ):
-                response, stats = call_role_with_stats(role, clean_query, context)
+            # ── Streaming mode (API providers: Groq, Cerebras, OpenRouter) ──
+            if provider_obj and hasattr(provider_obj, "stream"):
+                console.print(f"\n  [{style}]{label}[/]\n")
+                buf = []
+                try:
+                    for token in provider_obj.stream(clean_query, context):
+                        sys.stdout.write(token)
+                        sys.stdout.flush()
+                        buf.append(token)
+                except Exception:
+                    if not buf:
+                        raise
+                response = "".join(buf)
+                console.print()
+
+            # ── Batch mode (CLI providers: Claude, Gemini; Ollama fallback) ──
+            else:
+                with Live(
+                    Spinner("dots", text=f" [dim]{label} thinking...[/]"),
+                    console=console, refresh_per_second=12, transient=True
+                ):
+                    if provider_obj:
+                        response, stats = provider_obj.call_with_stats(clean_query, context)
+                    else:
+                        response, stats = call_role_with_stats(role, clean_query, context)
+
+                tok_str = _fmt_tokens(stats)
+                console.print(Panel(
+                    Markdown(response),
+                    title=f"[{style}]{label}[/]",
+                    subtitle=f"[dim]{tok_str}[/]" if tok_str else None,
+                    border_style="dim",
+                    padding=(1, 2),
+                ))
 
             session_total = session_total + stats
-            tok_str       = _fmt_tokens(stats)
             ses_str       = _fmt_session(session_total)
-
-            console.print(Panel(
-                Markdown(response),
-                title=f"[{style}]{label}[/]",
-                subtitle=f"[dim]{tok_str}[/]" if tok_str else None,
-                border_style="dim",
-                padding=(1, 2),
-            ))
             if ses_str:
                 console.print(f"  [dim]{ses_str}[/]")
             console.print()
