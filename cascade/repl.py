@@ -2,7 +2,7 @@
 Cascade interactive REPL — Rich UI, live token counter, input queue.
 """
 
-import re, sys, queue, threading
+import re, sys, subprocess, queue, threading
 from datetime import datetime
 
 from rich.console  import Console
@@ -79,6 +79,46 @@ _CODE_WORDS   = re.compile(r'\b(code|script|implement|build|refactor|debug|fix|f
 _GEMINI_WORDS = re.compile(r'\b(research|analyse|analyze|summarise|summarize|document|report|compare|deep.dive)\b')
 _LOCAL_WORDS  = re.compile(r'\b(private|privately|offline|sensitive|confidential|secret)\b')
 
+# ── System context — real-time bash data injected before LLM call ─────────────
+_SYSTEM_PROBES = [
+    (re.compile(r'\bwifi\b|\bwireless\b|\bwlan\b|\bnetworks?\b', re.I),
+     "nmcli device wifi list --rescan no 2>/dev/null | head -20"),
+    (re.compile(r'\bip address\b|\bwhat.*ip\b|\bmy ip\b|\bconnected.*network\b', re.I),
+     "ip addr show 2>/dev/null | grep -E 'state|inet '"),
+    (re.compile(r'\bdisk\b|\bstorage\b|\bfree space\b|\bdf\b', re.I),
+     "df -h 2>/dev/null"),
+    (re.compile(r'\bmemory\b|\bram\b|\bswap\b', re.I),
+     "free -h 2>/dev/null"),
+    (re.compile(r'\bcpu\b|\bload\b|\bprocessor\b', re.I),
+     "uptime && top -bn1 2>/dev/null | head -15"),
+    (re.compile(r'\bbattery\b|\bcharging\b|\bpower\b', re.I),
+     "cat /sys/class/power_supply/BAT*/capacity 2>/dev/null; cat /sys/class/power_supply/BAT*/status 2>/dev/null"),
+    (re.compile(r'\bprocess\b|\bwhat.*running\b|\bapps.*running\b|\bps\b', re.I),
+     "ps aux --sort=-%cpu 2>/dev/null | head -15"),
+    (re.compile(r'\btemperature\b|\btemp\b|\bheat\b|\bthermal\b', re.I),
+     "sensors 2>/dev/null | head -25"),
+    (re.compile(r'\bservice\b|\bdaemon\b|\bsystemctl\b', re.I),
+     "systemctl list-units --state=running --no-pager 2>/dev/null | head -20"),
+    (re.compile(r'\bollama\b|\blocal model\b', re.I),
+     "systemctl is-active ollama; curl -s http://localhost:11434/api/tags 2>/dev/null | python3 -c \"import json,sys; d=json.load(sys.stdin); [print(m['name']) for m in d.get('models',[])]\" 2>/dev/null"),
+    (re.compile(r'\buptime\b|\bhow long.*running\b|\bsince.*boot\b', re.I),
+     "uptime 2>/dev/null"),
+]
+
+def _system_context(query: str) -> str:
+    parts = []
+    for pattern, cmd in _SYSTEM_PROBES:
+        if pattern.search(query):
+            try:
+                r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
+                out = r.stdout.strip()
+                if out:
+                    label = cmd.split("2>/dev/null")[0].strip().split("|")[0].strip()
+                    parts.append(f"$ {label}\n{out}")
+            except Exception:
+                pass
+    return ("Live system state:\n" + "\n\n".join(parts)) if parts else ""
+
 def route_query(raw: str) -> tuple[str, str, str]:
     q = raw.strip()
 
@@ -130,7 +170,7 @@ def route_query(raw: str) -> tuple[str, str, str]:
     return ("model", "groq", q)
 
 
-def _build_context(session_msgs: list[dict], memory: dict) -> str:
+def _build_context(session_msgs: list[dict], memory: dict, query: str = "") -> str:
     rom     = load_context()
     hdd     = memory.get("hdd")
     ram     = memory.get("ram")
@@ -145,6 +185,8 @@ def _build_context(session_msgs: list[dict], memory: dict) -> str:
     if profile: parts.append(f"User profile:\n{profile}")
     if ram:     parts.append(f"Semantic memory:\n{ram}")
     if hdd:     parts.append(f"Past conversations:\n{hdd}")
+    sys_ctx = _system_context(query) if query else ""
+    if sys_ctx: parts.append(sys_ctx)
     if session_msgs:
         turns = "\n".join(
             f"{'User' if m['role'] == 'user' else 'Cascade'}: {m['content'][:300]}"
@@ -252,7 +294,7 @@ def run():
 
             if route_type == "skill":
                 memory  = recall(clean_query or raw)
-                context = _build_context(session_msgs, memory)
+                context = _build_context(session_msgs, memory, clean_query or raw)
                 with Live(
                     Spinner("dots", text=f" [dim]/{route_value}...[/]"),
                     console=console, refresh_per_second=12, transient=True
@@ -270,7 +312,7 @@ def run():
                 continue
 
             memory        = recall(raw)
-            context       = _build_context(session_msgs, memory)
+            context       = _build_context(session_msgs, memory, raw)
             role          = _ROLE_MAP.get(route_value, "general")
             registry      = _get_registry()
             provider_obj  = registry.get(route_value)
