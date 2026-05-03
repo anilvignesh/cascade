@@ -18,13 +18,28 @@ CLAUDE_BIN = str(Path.home() / ".local" / "bin" / "claude")
 
 
 async def _browse(url: str, wait: int = 2000) -> tuple[str, str]:
-    """Returns (text_content, screenshot_path)."""
+    \"\"\"Returns (text_content, screenshot_path).\"\"\"
     from playwright.async_api import async_playwright
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        page    = await browser.new_page()
+        # Use a realistic user agent and disable webdriver flag
+        browser = await p.chromium.launch(headless=True, args=[
+            '--disable-blink-features=AutomationControlled',
+        ])
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        )
+        page = await context.new_page()
+
+        # Manual stealth patch
+        await page.add_init_script(\"\"\"
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+        \"\"\")
+
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
         await page.wait_for_timeout(wait)
+
 
         text = await page.evaluate("""() => {
             const els = document.querySelectorAll('script, style, nav, footer, [aria-hidden]');
@@ -72,7 +87,7 @@ def screenshot(url: str) -> str:
 
 
 def search(query: str) -> str:
-    url  = f"https://duckduckgo.com/?q={query.replace(' ', '+')}&ia=web"
+    url  = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
     text, _ = asyncio.run(_browse(url))
     return text[:3000]
 

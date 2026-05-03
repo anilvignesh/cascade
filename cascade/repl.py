@@ -383,18 +383,36 @@ def run():
             if provider_obj and hasattr(provider_obj, "stream"):
                 console.print(f"\n  [{style}]{label}[/]\n")
                 buf = []
+                stream_failed = False
                 try:
                     for token in provider_obj.stream(clean_query, context):
                         sys.stdout.write(token)
                         sys.stdout.flush()
                         buf.append(token)
                 except Exception:
-                    if not buf:
-                        raise
-                response = "".join(buf)
-                console.print()
+                    stream_failed = not buf
 
-            # ── Batch mode (CLI providers: Claude, Gemini; Ollama fallback) ──
+                if stream_failed:
+                    # Remote unavailable — fall through role's provider chain to local
+                    console.print("[dim]  ↳ remote unavailable — local[/]\n")
+                    with Live(
+                        Spinner("dots", text=" [dim]local thinking...[/]"),
+                        console=console, refresh_per_second=12, transient=True
+                    ):
+                        response, stats = call_role_with_stats(role, clean_query, context)
+                    tok_str = _fmt_tokens(stats)
+                    console.print(Panel(
+                        Markdown(response),
+                        title="[bold yellow]Local[/]",
+                        subtitle=f"[dim]{tok_str}[/]" if tok_str else None,
+                        border_style="dim",
+                        padding=(1, 2),
+                    ))
+                else:
+                    response = "".join(buf)
+                    console.print()
+
+            # ── Batch mode (CLI providers: Claude, Gemini; Ollama) ──────────
             else:
                 with Live(
                     Spinner("dots", text=f" [dim]{label} thinking...[/]"),
